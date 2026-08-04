@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import utils.clients
+import utils.http_session
+import utils.transport
+import utils.session
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
@@ -18,6 +22,7 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     answer: str
+    trace: list[dict[str, object]] | None = None
 
 
 def build_agent() -> Agent:
@@ -43,4 +48,4 @@ def chat(request: ChatRequest) -> ChatResponse:
         result = agent.run(request.message, state=AgentState())
     except AgentError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return ChatResponse(answer=result.answer)
+    return ChatResponse(answer=result.answer, trace=result.state.trace)
