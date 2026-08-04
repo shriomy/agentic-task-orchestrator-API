@@ -52,6 +52,50 @@ pip install -r requirements.txt
 uvicorn src.main:app --reload
 ```
 
+If you want to use `uv`, the equivalent command is:
+
+```bash
+uv run uvicorn src.main:app --reload
+```
+
+Do not run `uv run python main.py` for this repo. The FastAPI app lives in `src/main.py`, so the ASGI app path is `src.main:app`.
+
+### Windows PowerShell quick start
+
+```powershell
+Set-Location D:\ICIEOS\agentic-task-orchestrator-API
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+uvicorn src.main:app --reload
+```
+
+### Try it out
+
+Health check:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8000/health
+```
+
+Direct question:
+
+```powershell
+Invoke-RestMethod -Method Post `
+  -Uri http://127.0.0.1:8000/chat `
+  -ContentType 'application/json' `
+  -Body '{"message":"Explain what an API is."}'
+```
+
+Weather question:
+
+```powershell
+Invoke-RestMethod -Method Post `
+  -Uri http://127.0.0.1:8000/chat `
+  -ContentType 'application/json' `
+  -Body '{"message":"What is the current weather in Colombo?"}'
+```
+
 ## Environment Variables
 
 Use these variables in `.env`:
