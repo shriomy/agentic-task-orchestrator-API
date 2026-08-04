@@ -96,6 +96,32 @@ Invoke-RestMethod -Method Post `
   -Body '{"message":"What is the current weather in Colombo?"}'
 ```
 
+### See tool calls and decision steps
+
+The `/chat` response now includes a `trace` field that shows the agent loop step by step.
+
+Example events you will see:
+
+1. `user_message_received`
+2. `llm_request`
+3. `llm_response`
+4. `tool_call_requested`
+5. `tool_arguments_parsed`
+6. `tool_call_completed`
+7. `tool_result_appended`
+8. `final_answer`
+
+Example request:
+
+```powershell
+Invoke-RestMethod -Method Post `
+  -Uri http://127.0.0.1:8000/chat `
+  -ContentType 'application/json' `
+  -Body '{"message":"What is the current weather in Colombo?"}'
+```
+
+The `trace` array in the response shows which tools were called and how the agent decided to move from one step to the next.
+
 ## Environment Variables
 
 Use these variables in `.env`:
