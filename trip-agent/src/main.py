@@ -13,14 +13,14 @@ class ChatRequest(BaseModel):
     thread_id: str
     user_id: str
     message: str
-    resume_token: str | None = None
+    resume_payload: Any | None = None
 
 
 class ChatResponse(BaseModel):
     thread_id: str
     user_id: str
     response: str
-    resume_token: str | None = None
+    resume_payload: Any | None = None
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -32,7 +32,7 @@ def chat(request: ChatRequest) -> ChatResponse:
                 "user_id": request.user_id,
                 "message": request.message,
             },
-            resume=request.resume_token,
+            resume=request.resume_payload,
         )
 
         with trace(
@@ -52,15 +52,15 @@ def chat(request: ChatRequest) -> ChatResponse:
         response_text = str(
             result.get("last_agent_output")
             or result.get("bot_response")
-            or result.get("tool_result")
             or ""
         )
+        resume_payload = result.get("__interrupt__") if isinstance(result, dict) else None
 
         return ChatResponse(
             thread_id=request.thread_id,
             user_id=request.user_id,
             response=response_text,
-            resume_token=request.resume_token,
+            resume_payload=resume_payload,
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))

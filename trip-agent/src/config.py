@@ -23,6 +23,9 @@ class Settings(BaseSettings):
 
     default_max_iterations: int = 6
     request_timeout_seconds: int = 20
+    postgres_pool_min: int = 4
+    postgres_pool_max: int | None = None
+    postgres_pool_timeout: float = 30.0
 
     class Config:
         env_file = ".env"
