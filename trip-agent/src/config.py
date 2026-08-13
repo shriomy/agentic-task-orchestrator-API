@@ -17,9 +17,20 @@ class Settings(BaseSettings):
     amadeus_environment: str = "production"
 
     tavily_api_key: str
+    opentripmap_api_key: str | None = None
+    ticketmaster_api_key: str | None = None
+    hotel_search_provider: str = "amadeus"
+    hotel_search_api_key: str | None = None
+
+    mongodb_uri: str | None = None
+    mongodb_db_name: str = "travel_discovery"
+    mongodb_favorites_collection: str = "favorites"
 
     langsmith_api_key: str | None = None
     langsmith_project_name: str = "travel-discovery-agent"
+
+    openrouter_api_key: str | None = None
+    openrouter_api_base: str | None = None
 
     default_max_iterations: int = 6
     request_timeout_seconds: int = 20
