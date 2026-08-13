@@ -12,10 +12,6 @@ class Settings(BaseSettings):
     supabase_anon_key: str
     supabase_db_url: str
 
-    amadeus_client_id: str
-    amadeus_client_secret: str
-    amadeus_environment: str = "production"
-
     tavily_api_key: str
     opentripmap_api_key: str | None = None
     ticketmaster_api_key: str | None = None

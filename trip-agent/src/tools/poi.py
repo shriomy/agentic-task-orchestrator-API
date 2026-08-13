@@ -1,12 +1,26 @@
-from ..tools.amadeus_client import amadeus_client
+import requests
+
+from ..config import settings
 
 
-def search_points_of_interest(city: str, latitude: float, longitude: float, category: str | None = None) -> dict:
-    params = {
-        "cityCode": city,
-        "latitude": latitude,
-        "longitude": longitude,
-    }
+def search_places(city: str | None = None, latitude: float | None = None, longitude: float | None = None, category: str | None = None) -> dict:
+    if not settings.opentripmap_api_key:
+        raise RuntimeError("OPENTRIPMAP_API_KEY is required for place search.")
+
+    params = {"apikey": settings.opentripmap_api_key}
+    if city:
+        params["city"] = city
+    if latitude is not None:
+        params["lat"] = latitude
+    if longitude is not None:
+        params["lon"] = longitude
     if category:
-        params["keyword"] = category
-    return amadeus_client.get("/v1/reference-data/locations/pois", params=params)
+        params["kinds"] = category
+
+    response = requests.get(
+        "https://api.opentripmap.com/0.1/en/places/geoname",
+        params=params,
+        timeout=settings.request_timeout_seconds,
+    )
+    response.raise_for_status()
+    return response.json()

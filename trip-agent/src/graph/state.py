@@ -1,14 +1,24 @@
-from pydantic import BaseModel
 from typing import Any
+
 from pydantic import BaseModel, Field
+
+
+class Selection(BaseModel):
+    options: list[str] = Field(default_factory=list)
+    picked: str | None = None
+    skipped: list[str] = Field(default_factory=list)
+    turn_index: int = 0
 
 
 class GraphState(BaseModel):
     thread_id: str
-    user_id: str
+    user_id: str = ""
     route: str | None = None
     message: str | None = None
     messages: list[Any] = Field(default_factory=list)
+    selections: list[Selection] = Field(default_factory=list)
+    turn_index: int = 0
+    tool_round_count: int = 0
     user_memory_summary: dict[str, Any] | None = None
     hil_preference: str | None = None
     hil_review_reply: Any | None = None
