@@ -361,7 +361,15 @@ def remove_trip_favorite_section_tool(
         destination=destination,
     )
     if not confirmed:
-        return {"action": "cancelled", "destination": destination, "section": resolved}
+        return {
+            "action": "cancelled",
+            "destination": destination,
+            "section": resolved,
+            # Blunt on purpose: models have reported a cancelled action as a
+            # success when the field alone was "cancelled" — this line must be
+            # impossible to misread as "it happened".
+            "outcome_for_user": f"NOT removed. The user said no, so the {resolved} in {destination} is unchanged.",
+        }
     return remove_favorite_section(user_id, destination, section, item_ids=item_ids)
 
 
@@ -385,7 +393,11 @@ def delete_trip_favorite_tool(destination: str, config: RunnableConfig = None) -
         destination=destination,
     )
     if not confirmed:
-        return {"action": "cancelled", "destination": destination}
+        return {
+            "action": "cancelled",
+            "destination": destination,
+            "outcome_for_user": f"NOT deleted. The user said no, so the {destination} trip is still saved exactly as it was.",
+        }
     return delete_favorite(user_id, destination)
 
 

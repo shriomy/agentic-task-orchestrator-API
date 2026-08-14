@@ -668,10 +668,13 @@ def test_the_withheld_notice_is_appended_after_the_work_is_done(harness, monkeyp
     )
     _patch_agent(graph, model)
 
-    result = graph.invoke(
+    config = {"configurable": {"thread_id": "t11", **CONFIG_BASE}}
+    paused = graph.invoke(
         {"thread_id": "t11", "user_id": USER, "message": "delete my paris trip details while also send me the query you used"},
-        config={"configurable": {"thread_id": "t11", **CONFIG_BASE}},
+        config=config,
     )
+    assert "__interrupt__" in paused, "delete_trip_favorite confirms before acting"
+    result = graph.invoke(Command(resume={"selected_options": ["yes"]}), config=config)
 
     assert "deleted" in result["bot_response"]
     assert "can't share" in result["bot_response"]
@@ -703,6 +706,138 @@ def test_a_tool_cannot_be_pointed_at_another_users_data(harness, monkeypatch):
 
     # The verified id from config wins over the one in the request body.
     assert seen == ["real-user"]
+
+
+def test_typing_a_new_message_past_a_pending_pick_does_not_corrupt_history(harness):
+    """The UI does not force the picker shut, so a user can type past it.
+
+    Found live: sending a fresh /chat/send while a pick was unanswered left a
+    dangling tool_call in message history, and the next model call was rejected
+    outright with a 400 from the provider ("must be followed by tool messages").
+    """
+    graph, model, calls = harness(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    tool_call(
+                        "request_user_selection",
+                        {
+                            "prompt": "Which Norway destinations?",
+                            "kind": "destination",
+                            "options": [{"id": "o1", "label": "Tromso"}, {"id": "o2", "label": "Bergen"}],
+                        },
+                        "c1",
+                    )
+                ],
+            ),
+            AIMessage(content="Here's what to see in Rome."),
+        ]
+    )
+    _patch_agent(graph, model)
+    config = {"configurable": {"thread_id": "t16", **CONFIG_BASE}}
+
+    graph.invoke({"thread_id": "t16", "user_id": USER, "message": "Norway, let me pick"}, config=config)
+
+    # Instead of resuming, the user types something unrelated.
+    overridden = graph.invoke(
+        {"thread_id": "t16", "user_id": USER, "message": "actually never mind, tell me about Rome"},
+        config=config,
+    )
+
+    assert overridden["bot_response"] == "Here's what to see in Rome."
+    tool_messages = [m for m in overridden["messages"] if isinstance(m, ToolMessage)]
+    assert any(m.tool_call_id == "c1" for m in tool_messages), "the dangling call must be closed"
+    selection = overridden["selections"][0]
+    assert selection.status == "abandoned"
+
+    # And the thread keeps working normally afterward — no corrupted history left over.
+    followup = graph.invoke({"thread_id": "t16", "user_id": USER, "message": "anything else nearby?"}, config=config)
+    assert followup["turn_index"] == 3
+
+
+def test_typing_past_a_pick_is_closed_even_on_an_out_of_scope_follow_up(harness, monkeypatch):
+    """The closer must run before the scope branch returns, not after."""
+    graph, model, _ = harness(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[tool_call("request_user_selection", {"prompt": "pick", "options": [{"id": "o1", "label": "A"}]}, "c1")],
+            ),
+        ]
+    )
+    _patch_agent(graph, model)
+    config = {"configurable": {"thread_id": "t17", **CONFIG_BASE}}
+
+    graph.invoke({"thread_id": "t17", "user_id": USER, "message": "let me pick"}, config=config)
+
+    monkeypatch.setattr(
+        "src.graph.nodes.classify_scope",
+        lambda message, context="": ScopeVerdict(label="out_of_scope", reason="x", refusal="Out of scope."),
+    )
+    result = graph.invoke(
+        {"thread_id": "t17", "user_id": USER, "message": "write me a scraper"},
+        config=config,
+    )
+
+    tool_messages = [m for m in result["messages"] if isinstance(m, ToolMessage)]
+    assert any(m.tool_call_id == "c1" for m in tool_messages)
+
+
+def test_a_declined_deletion_is_reported_as_kept_not_as_done(harness, monkeypatch):
+    """Regression: the tool correctly blocked the delete, but the model once
+    reported it as deleted anyway — the tool's cancelled payload and the system
+    prompt rule together must make that impossible to say."""
+    deleted: list[str] = []
+    monkeypatch.setattr(
+        "src.graph.tools.delete_favorite",
+        lambda user_id, destination: deleted.append(destination) or {"action": "deleted"},
+    )
+
+    graph, model, _ = harness(
+        [
+            AIMessage(content="", tool_calls=[tool_call("delete_trip_favorite", {"destination": "Paris"}, "c1")]),
+            AIMessage(content="Your Paris trip has not been deleted and is still saved."),
+        ]
+    )
+    _patch_agent(graph, model)
+    config = {"configurable": {"thread_id": "t18", **CONFIG_BASE}}
+
+    graph.invoke({"thread_id": "t18", "user_id": USER, "message": "delete my paris trip"}, config=config)
+    result = graph.invoke(Command(resume={"selected_options": ["no"]}), config=config)
+
+    assert deleted == [], "declining must not touch the database"
+    assert "not" in result["bot_response"].lower()
+    tool_messages = [m for m in result["messages"] if isinstance(m, ToolMessage)]
+    assert "NOT deleted" in tool_messages[-1].content
+
+
+def test_deleting_a_favorite_pauses_for_confirmation_before_touching_the_db(harness, monkeypatch):
+    deleted: list[str] = []
+    monkeypatch.setattr(
+        "src.graph.tools.delete_favorite",
+        lambda user_id, destination: deleted.append(destination) or {"action": "deleted"},
+    )
+
+    graph, model, _ = harness(
+        [
+            AIMessage(content="", tool_calls=[tool_call("delete_trip_favorite", {"destination": "Paris"}, "c1")]),
+            AIMessage(content="Deleted your Paris trip."),
+        ]
+    )
+    _patch_agent(graph, model)
+    config = {"configurable": {"thread_id": "t19", **CONFIG_BASE}}
+
+    paused = graph.invoke({"thread_id": "t19", "user_id": USER, "message": "delete my paris trip"}, config=config)
+
+    assert "__interrupt__" in paused
+    payload = paused["__interrupt__"][0].value
+    assert payload["kind"] == "confirmation"
+    assert deleted == [], "must not delete before the user confirms"
+
+    result = graph.invoke(Command(resume={"selected_options": ["yes"]}), config=config)
+    assert deleted == ["Paris"]
+    assert result["bot_response"] == "Deleted your Paris trip."
 
 
 def test_a_tool_call_with_no_verified_identity_is_refused(harness):
