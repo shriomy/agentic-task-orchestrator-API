@@ -1,27 +1,89 @@
-from psycopg import Connection
-from psycopg.rows import dict_row
-from psycopg_pool import ConnectionPool
-from langgraph.checkpoint.postgres import PostgresSaver
+"""Thread-scoped conversation state, persisted by LangGraph's checkpointer.
+
+This is the State scope: messages, selections, turn_index and tool_round_count,
+saved automatically against thread_id on every super-step. It is also what makes
+`interrupt()` resumable — the pending pick is part of the checkpoint, so a user
+can answer an interrupt minutes later, or reopen the thread and continue.
+
+Built lazily with an in-memory fallback: no SUPABASE_DB_URL means the graph
+still runs (single process, non-durable) instead of failing at import.
+"""
+
+from __future__ import annotations
+
+import logging
+import threading
+from typing import Any
 
 from ..config import settings
 
+logger = logging.getLogger(__name__)
 
-# Conversation memory is stored per thread in Postgres via LangGraph's checkpointer.
-# This is distinct from user memory, which is durable and queryable through dedicated Supabase tables.
-def _configure_connection(conn: Connection) -> None:
-    conn.autocommit = True
-    conn.row_factory = dict_row
+_checkpointer: Any = None
+_pool: Any = None
+_lock = threading.Lock()
 
 
-connection_pool = ConnectionPool(
-    settings.supabase_db_url,
-    connection_class=Connection,
-    configure=_configure_connection,
-    min_size=settings.postgres_pool_min,
-    max_size=settings.postgres_pool_max,
-    timeout=settings.postgres_pool_timeout,
-)
-conversation_checkpointer = PostgresSaver(connection_pool)
+def _build_postgres_checkpointer() -> Any | None:
+    if not settings.supabase_db_url:
+        return None
+    global _pool
+    try:
+        from langgraph.checkpoint.postgres import PostgresSaver
+        from psycopg import Connection
+        from psycopg.rows import dict_row
+        from psycopg_pool import ConnectionPool
 
-# Ensure checkpoint tables exist before starting request handling.
-conversation_checkpointer.setup()
+        def configure(conn: Connection) -> None:
+            # The checkpointer manages its own transactions and expects dict rows.
+            conn.autocommit = True
+            conn.row_factory = dict_row
+
+        _pool = ConnectionPool(
+            settings.supabase_db_url,
+            connection_class=Connection,
+            configure=configure,
+            min_size=settings.postgres_pool_min,
+            max_size=settings.postgres_pool_max,
+            timeout=settings.postgres_pool_timeout,
+            open=True,
+            kwargs={"prepare_threshold": None},  # required behind Supabase's pooler
+        )
+        saver = PostgresSaver(_pool)
+        saver.setup()  # creates the library-owned checkpoint tables
+        logger.info("conversation checkpointer: postgres")
+        return saver
+    except Exception as exc:
+        logger.warning(
+            "postgres checkpointer unavailable (%s); falling back to in-memory. "
+            "Threads will not survive a restart.",
+            exc,
+        )
+        return None
+
+
+def get_checkpointer() -> Any:
+    global _checkpointer
+    if _checkpointer is not None:
+        return _checkpointer
+    with _lock:
+        if _checkpointer is None:
+            _checkpointer = _build_postgres_checkpointer()
+            if _checkpointer is None:
+                from langgraph.checkpoint.memory import InMemorySaver
+
+                _checkpointer = InMemorySaver()
+                logger.info("conversation checkpointer: in-memory")
+    return _checkpointer
+
+
+def close_checkpointer() -> None:
+    """Release the connection pool on application shutdown."""
+    global _pool, _checkpointer
+    if _pool is not None:
+        try:
+            _pool.close()
+        except Exception:
+            pass
+        _pool = None
+    _checkpointer = None

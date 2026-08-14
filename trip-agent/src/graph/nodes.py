@@ -1,372 +1,507 @@
-import json
-import re
-from typing import Annotated, Any, Literal
+"""Graph nodes.
 
-from langchain.chat_models import init_chat_model
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
-from langchain_core.tools import tool
-from langgraph.prebuilt import InjectedState
-from langgraph.prebuilt.tool_node import ToolNode
-from langgraph.types import Command, interrupt
-from pydantic import BaseModel
+Turn shape:
+
+    preprocess -> summarize -> agent -> [tools -> agent]* -> finalize -> persist
+
+`preprocess` runs guardrail 1 (scope) and the request-splitting half of
+guardrail 2, loads cross-thread memory, and detects whether the user wants to
+pick. `finalize` runs the redaction half of guardrail 2. Guardrail 3 is enforced
+inside the tools themselves, since that is the only place a query is issued.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from typing import Any
+
+from langchain_core.messages import (
+    AIMessage,
+    HumanMessage,
+    RemoveMessage,
+    SystemMessage,
+    ToolMessage,
+)
+from langchain_core.runnables import RunnableConfig
+from langgraph.errors import GraphBubbleUp
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
+from langgraph.types import Command
 
 from ..config import settings
-from ..memory.user_memory import get_user_memory_summary, write_user_memory
-from ..tools.activities import search_events
-from ..tools.destinations import search_destinations
-from ..tools.favorites import delete_favorite, get_favorites, save_favorite, update_favorite
-from ..tools.hotels import search_accommodations
-from ..tools.poi import search_places
-from .state import GraphState, Selection
+from ..guardrails.authorization import AuthorizationError
+from ..guardrails.output import apply_output_guardrail, split_request
+from ..guardrails.scope import classify_scope
+from ..llm import build_model, fast_model
+from ..memory.user_memory import (
+    ALLOWED_KEYS,
+    get_user_memory_summary,
+    write_user_memory,
+)
+from ..tools.http import ToolError
+from .context import build_prompt
+from .state import GraphState
+from .tools import ALL_TOOLS, SELECTION_TOOL, TOOLS_BY_NAME
 
-try:
-    from langmem.short_term import SummarizationNode as LangMemSummarizationNode
-except ImportError:  # pragma: no cover - optional dependency at runtime
-    class LangMemSummarizationNode:  # type: ignore[no-redef]
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            self.args = args
-            self.kwargs = kwargs
+logger = logging.getLogger(__name__)
 
-        def __call__(self, state: Any) -> dict[str, Any]:
-            return {}
+# Tools that take the graph state via InjectedState. Everything else is called
+# with the model's arguments alone.
+_STATE_INJECTED_TOOLS = {SELECTION_TOOL, "save_trip_favorite"}
 
-
-class RouteDecision(BaseModel):
-    route: Literal["chat", "task", "off_topic"] = "task"
-
-
-def _trim_message(state: Any) -> str:
-    if isinstance(state, dict):
-        return str(state.get("message") or "")
-    return str(getattr(state, "message", None) or "")
-
-
-def _coerce_state(state: Any) -> dict[str, Any]:
-    if isinstance(state, dict):
-        return state
-    if hasattr(state, "model_dump"):
-        return state.model_dump()
-    return state.__dict__
-
-
-def _current_user_id(state: Any) -> str:
-    if isinstance(state, dict):
-        return str(state.get("user_id") or "")
-    return str(getattr(state, "user_id", "") or "")
-
-
-def _selection_context(state: Any) -> str:
-    selections = getattr(state, "selections", None) or []
-    if not selections:
-        return "No selections yet."
-    lines = []
-    for selection in selections:
-        if selection.picked:
-            lines.append(f"turn {selection.turn_index}: picked {selection.picked}; skipped {', '.join(selection.skipped) if selection.skipped else 'none'}")
-        else:
-            lines.append(f"turn {selection.turn_index}: no pick yet; options {', '.join(selection.options)}")
-    return "Selections so far: " + " | ".join(lines)
-
-
-def _build_model(model_name: str | None = None, *, fast: bool = False):
-    provider = settings.llm_provider or "openai"
-    api_key = settings.llm_api_key
-    base_url = settings.llm_api_base
-    if provider == "openrouter":
-        api_key = settings.openrouter_api_key or settings.llm_api_key
-        base_url = settings.openrouter_api_base or "https://openrouter.ai/api/v1"
-        provider = "openai"
-    if fast:
-        model_name = model_name or "gpt-4o-mini"
-    else:
-        model_name = model_name or settings.llm_model
-    kwargs = {}
-    if api_key:
-        kwargs["api_key"] = api_key
-    if base_url:
-        kwargs["base_url"] = base_url
-    return init_chat_model(model=model_name, model_provider=provider, **kwargs)
-
-
-def _tool_call_wrapper(request: Any, execute: Any) -> Any:
-    result = execute(request)
-    if isinstance(result, Command):
-        return result
-    if isinstance(result, ToolMessage):
-        prior_messages = []
-        if isinstance(request.state, dict):
-            prior_messages = request.state.get("messages", []) or []
-        elif hasattr(request.state, "messages"):
-            prior_messages = getattr(request.state, "messages", []) or []
-        tool_round_count = 0
-        if isinstance(request.state, dict):
-            tool_round_count = int(request.state.get("tool_round_count", 0))
-        else:
-            tool_round_count = int(getattr(request.state, "tool_round_count", 0))
-        return Command(update={"messages": [*prior_messages, result], "tool_round_count": tool_round_count + 1})
-    return result
-
-
-def scrub_internals(text: str) -> str:
-    if not text:
-        return text
-    scrubbed = text
-    scrubbed = re.sub(r"(?i)sk-[A-Za-z0-9]{10,}", "[REDACTED_API_KEY]", scrubbed)
-    scrubbed = re.sub(r"(?i)(api[_-]?key|token|secret|base_url|endpoint)\s*[:=]\s*[^\s\"'`]+", r"\1=[REDACTED]", scrubbed)
-    scrubbed = re.sub(r"(?i)Authorization\s*:\s*Bearer\s+[A-Za-z0-9._-]+", "Authorization: [REDACTED]", scrubbed)
-    scrubbed = re.sub(r"https?://[^\s\"'`]+", "[REDACTED_ENDPOINT]", scrubbed)
-    scrubbed = re.sub(r"(?i)\b(search_destinations_tool|search_places_tool|search_events_tool|search_accommodations_tool|save_favorite_tool|get_favorites_tool|update_favorite_tool|delete_favorite_tool)\b", "[tool]", scrubbed)
-    return scrubbed
-
-
-def _draft_has_internal_leaks(draft: str) -> bool:
-    leaks = [
-        r"(?i)\b(search_destinations_tool|search_places_tool|search_events_tool|search_accommodations_tool|save_favorite_tool|get_favorites_tool|update_favorite_tool|delete_favorite_tool)\b",
-        r"(?i)sk-[A-Za-z0-9]{10,}",
-        r"(?i)(api[_-]?key|token|secret|base_url|endpoint)\s*[:=]\s*[^\s\"'`]+",
-        r"https?://[^\s\"'`]+",
-    ]
-    return any(re.search(pattern, draft) for pattern in leaks)
-
-
-@tool
-def search_destinations_tool(query: str) -> dict:
-    return search_destinations(query)
-
-
-@tool
-def search_places_tool(city: str, latitude: float | None = None, longitude: float | None = None, category: str | None = None) -> dict:
-    return search_places(city=city, latitude=latitude, longitude=longitude, category=category)
-
-
-@tool
-def search_events_tool(city: str, start_date: str | None = None, end_date: str | None = None, keyword: str | None = None) -> dict:
-    return search_events(city=city, keyword=keyword, start_date=start_date, end_date=end_date)
-
-
-@tool
-def search_accommodations_tool(location: str, check_in: str, check_out: str, adults: int = 2, max_price: float | None = None) -> dict:
-    return search_accommodations(location=location, check_in=check_in, check_out=check_out, adults=adults, max_price=max_price)
-
-
-@tool
-def save_favorite_tool(city: str, events: list[dict], hotel: dict | None = None, notes: str | None = None, state: Annotated[Any, InjectedState] = None) -> dict:
-    user_id = _current_user_id(state)
-    return save_favorite(user_id, city, events, hotel or {}, notes)
-
-
-@tool
-def get_favorites_tool(state: Annotated[Any, InjectedState] = None) -> dict:
-    user_id = _current_user_id(state)
-    return get_favorites(user_id)
-
-
-@tool
-def update_favorite_tool(favorite_id: str, updates: dict[str, Any], state: Annotated[Any, InjectedState] = None) -> Command:
-    return ask_user_to_select_tool(
-        state=state,
-        options=[f"Confirm update for favorite {favorite_id}", "Skip update"],
-        prompt="A destructive favorite update is pending. Confirm or skip it.",
-        action="update_favorite",
-        target_id=favorite_id,
-        payload={"favorite_id": favorite_id, "updates": updates},
-    )
-
-
-@tool
-def delete_favorite_tool(favorite_id: str, state: Annotated[Any, InjectedState] = None) -> Command:
-    return ask_user_to_select_tool(
-        state=state,
-        options=[f"Confirm delete for favorite {favorite_id}", "Skip delete"],
-        prompt="A destructive favorite delete is pending. Confirm or skip it.",
-        action="delete_favorite",
-        target_id=favorite_id,
-        payload={"favorite_id": favorite_id},
-    )
-
-
-@tool
-def ask_user_to_select_tool(
-    options: list[str],
-    state: Annotated[Any, InjectedState] = None,
-    prompt: str = "Please choose one option.",
-    action: str = "selection",
-    target_id: str | None = None,
-    payload: dict[str, Any] | None = None,
-) -> Command:
-    state_data = _coerce_state(state)
-    prior = state_data.get("selections", []) if isinstance(state_data, dict) else getattr(state, "selections", []) or []
-    turn_index = int(state_data.get("turn_index", 0) if isinstance(state_data, dict) else getattr(state, "turn_index", 0) or 0)
-    next_turn_index = turn_index + 1
-    selection = Selection(options=options, picked=None, skipped=[], turn_index=next_turn_index)
-    reply = interrupt({"prompt": prompt, "options": options, "action": action, "target_id": target_id, "payload": payload or {}, "turn_index": next_turn_index})
-    if isinstance(reply, dict):
-        chosen = reply.get("picked") or reply.get("selection")
-    else:
-        chosen = reply
-    if chosen in options:
-        selection.picked = chosen
-        selection.skipped = [item for item in options if item != chosen]
-    else:
-        selection.picked = None
-        selection.skipped = list(options)
-    updated = [*prior, selection]
-    return Command(update={"selections": updated, "turn_index": next_turn_index})
-
-
-TOOL_NODE = ToolNode(
-    [
-        search_destinations_tool,
-        search_places_tool,
-        search_events_tool,
-        search_accommodations_tool,
-        save_favorite_tool,
-        get_favorites_tool,
-        update_favorite_tool,
-        delete_favorite_tool,
-        ask_user_to_select_tool,
-    ],
-    handle_tool_errors=True,
-    messages_key="messages",
-    wrap_tool_call=_tool_call_wrapper,
+# Phrasings that mean "let me choose before you go further". This is a hint that
+# biases the agent, not a gate — the agent decides whether to actually pause.
+_SELECTION_CUES = (
+    "let me pick",
+    "let me choose",
+    "let me select",
+    "so i can pick",
+    "so i can choose",
+    "so i can decide",
+    "i'll pick",
+    "i will pick",
+    "i'll choose",
+    "i'll tell you which",
+    "ask me which",
+    "let me decide",
+    "give me options",
+    "i want to pick",
+    "i want to choose",
+    "before you",
 )
 
 
-class StartRouter:
-    def __call__(self, state: Any) -> dict[str, str]:
-        model = _build_model("gpt-4o-mini", fast=True).with_structured_output(RouteDecision)
-        prompt = (
-            "Classify the latest message as travel-related, travel-favorites related, or unrelated. "
-            "Use 'task' for travel planning or saved favorites; 'chat' for brief social conversation; 'off_topic' for anything else."
+def _recent_context(state: GraphState, limit: int = 4) -> str:
+    """A few recent turns, given to the scope classifier so follow-ups make sense."""
+    lines: list[str] = []
+    for message in (state.messages or [])[-limit * 2 :]:
+        if isinstance(message, HumanMessage):
+            lines.append(f"user: {str(message.content)[:300]}")
+        elif isinstance(message, AIMessage) and message.content:
+            lines.append(f"assistant: {str(message.content)[:300]}")
+    return "\n".join(lines)
+
+
+class PreprocessNode:
+    """Guardrail 1 + the request-split half of guardrail 2 + memory load."""
+
+    def __call__(self, state: GraphState, config: RunnableConfig = None) -> dict[str, Any]:
+        message = (state.message or "").strip()
+        updates: dict[str, Any] = {
+            "turn_index": int(state.turn_index or 0) + 1,
+            "tool_round_count": 0,
+            "withheld_kinds": [],
+            "bot_response": None,
+            "last_agent_output": None,
+        }
+
+        verdict = classify_scope(message, _recent_context(state))
+        updates["scope"] = verdict.label
+        updates["scope_reason"] = verdict.reason
+
+        if verdict.label == "out_of_scope":
+            # Refuse without adding the message to history — an off-topic turn
+            # should not pollute the travel context of later turns.
+            updates["bot_response"] = verdict.refusal
+            return updates
+
+        if verdict.label == "smalltalk":
+            updates["messages"] = [HumanMessage(content=message)] if message else []
+            return updates
+
+        split = split_request(message)
+        updates["withheld_kinds"] = [item.kind for item in split.withheld]
+        updates["allowed_request"] = split.allowed_request or message
+
+        if split.withheld:
+            logger.info(
+                "output guardrail withheld %s from turn %s",
+                [item.kind for item in split.withheld],
+                updates["turn_index"],
+            )
+
+        lowered = message.lower()
+        updates["wants_selection"] = any(cue in lowered for cue in _SELECTION_CUES)
+
+        # The agent sees the sanitised request, not the raw one, so a bolted-on
+        # "and send me the query" never reaches the model at all.
+        if message:
+            updates["messages"] = [HumanMessage(content=updates["allowed_request"])]
+
+        user_id = ((config or {}).get("configurable") or {}).get("auth_user_id") or state.user_id
+        summary = get_user_memory_summary(user_id)
+        updates["user_memory_summary"] = summary.model_dump()
+
+        return updates
+
+
+class SmalltalkNode:
+    def __call__(self, state: GraphState) -> dict[str, Any]:
+        try:
+            model = fast_model()
+            reply = model.invoke(
+                [
+                    SystemMessage(
+                        content=(
+                            "You are a friendly trip organiser assistant. Reply to this social "
+                            "message in one or two warm sentences, and mention that you can help "
+                            "plan a trip — finding destinations, places to visit, events, and "
+                            "places to stay — or pull up the trips they've already saved. "
+                            "Do not list tool names."
+                        )
+                    ),
+                    HumanMessage(content=state.message or "hello"),
+                ]
+            )
+            text = str(getattr(reply, "content", "") or "").strip()
+        except Exception as exc:
+            logger.warning("smalltalk model unavailable: %s", exc)
+            text = ""
+
+        if not text:
+            text = (
+                "Happy to help! Tell me where you're thinking of going and I can suggest "
+                "destinations, places to visit, what's on while you're there, and where to "
+                "stay — or pull up a trip you've already saved."
+            )
+        return {"bot_response": text, "messages": [AIMessage(content=text)]}
+
+
+class OutOfScopeNode:
+    def __call__(self, state: GraphState) -> dict[str, Any]:
+        text = state.bot_response or (
+            "That one is outside what I can help with. I'm here for trip planning — "
+            "destinations, places to visit, events, places to stay, and the trips you've saved."
         )
-        result = model.invoke([HumanMessage(content=f"{prompt}\n\nMessage:\n{_trim_message(state)}")])
-        return {"route": result.route}
+        return {"bot_response": text}
 
 
-class ChatNode:
-    def __call__(self, state: Any) -> dict[str, str]:
-        return {"bot_response": "Thanks for reaching out! I can also help with travel planning or your saved favorites whenever you are ready."}
+class SummarizationNode:
+    """Compress older history once it outgrows the budget, via langmem.
 
+    The summary is kept in `running_summary` and rendered back into the prompt by
+    context.build_prompt, rather than being pushed into the message list as a
+    SystemMessage — that keeps exactly one system block per model call.
+    """
 
-class OffTopicNode:
-    def __call__(self, state: Any) -> dict[str, str]:
-        return {"bot_response": "I can help with travel planning, destinations, events, accommodations, and your saved favorites. Please ask about those topics."}
-
-
-class MemoryInjectionNode:
-    def __call__(self, state: Any) -> dict[str, Any]:
-        if getattr(state, "message", None):
-            current_messages = list(getattr(state, "messages", []) or [])
-            current_messages.append(HumanMessage(content=state.message))
-            state.messages = current_messages
-        summary = get_user_memory_summary(_current_user_id(state))
-        state.user_memory_summary = summary.model_dump()
-        return {"user_memory_summary": state.user_memory_summary, "messages": state.messages}
-
-
-class SummarizationNode(LangMemSummarizationNode):
-    def __init__(self, token_threshold: int = 12000, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        self.token_threshold = token_threshold
-
-    def __call__(self, state: Any) -> dict[str, Any]:
-        messages = list(getattr(state, "messages", []) or [])
-        if not messages:
+    def __call__(self, state: GraphState) -> dict[str, Any]:
+        messages = [
+            message
+            for message in (state.messages or [])
+            if isinstance(message, (HumanMessage, AIMessage, ToolMessage))
+        ]
+        if len(messages) < 6:
             return {}
-        selections = [msg for msg in messages if isinstance(msg, SystemMessage) and "Selections so far" in str(msg.content)]
-        non_selection_messages = [msg for msg in messages if not (isinstance(msg, SystemMessage) and "Selections so far" in str(msg.content))]
-        if len(non_selection_messages) < 6:
+
+        try:
+            from langmem.short_term.summarization import summarize_messages
+        except ImportError:
+            logger.debug("langmem not installed; skipping summarization")
             return {}
-        approximate_tokens = sum(len(str(getattr(msg, "content", ""))) // 4 for msg in messages)
-        if approximate_tokens < self.token_threshold:
+
+        try:
+            result = summarize_messages(
+                messages,
+                running_summary=state.running_summary,
+                model=fast_model(),
+                max_tokens=settings.summary_token_threshold,
+                max_summary_tokens=512,
+            )
+        except Exception as exc:
+            logger.warning("summarization failed, keeping full history: %s", exc)
             return {}
-        summary_text = "Conversation summary: " + " ".join(str(getattr(msg, "content", "")) for msg in non_selection_messages[-6:])
-        new_messages = [*selections, SystemMessage(content=summary_text)]
-        return {"messages": new_messages}
+
+        if result.running_summary is None or result.running_summary is state.running_summary:
+            return {}  # under budget; nothing was compressed
+
+        # langmem prepends its own SystemMessage carrying the summary; drop it,
+        # since the summary now travels in state.running_summary instead.
+        kept = [message for message in result.messages if not isinstance(message, SystemMessage)]
+        return {
+            "messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *kept],
+            "running_summary": result.running_summary,
+        }
 
 
 class AgentNode:
+    """Calls the model with tools bound."""
+
     def __init__(self) -> None:
-        self.model = _build_model().bind_tools(
-            [
-                search_destinations_tool,
-                search_places_tool,
-                search_events_tool,
-                search_accommodations_tool,
-                save_favorite_tool,
-                get_favorites_tool,
-                update_favorite_tool,
-                delete_favorite_tool,
-                ask_user_to_select_tool,
-            ]
-        )
+        self._model: Any = None
 
-    def __call__(self, state: Any) -> dict[str, Any]:
-        messages = list(getattr(state, "messages", []) or [])
-        if not messages:
-            messages.append(HumanMessage(content=_trim_message(state)))
-        selection_summary = _selection_context(state)
-        messages = [SystemMessage(content=selection_summary), *messages]
-        response = self.model.invoke({"messages": messages})
-        if isinstance(response, AIMessage):
-            state.messages = messages + [response]
-            state.last_agent_output = response.content
-        else:
-            state.last_agent_output = str(response)
-            if hasattr(response, "content"):
-                state.messages = messages + [response]
-        return {"messages": state.messages, "last_agent_output": state.last_agent_output}
+    @property
+    def model(self) -> Any:
+        # Bound lazily so the module imports without LLM credentials present.
+        if self._model is None:
+            self._model = build_model().bind_tools(ALL_TOOLS)
+        return self._model
+
+    def __call__(self, state: GraphState, config: RunnableConfig = None) -> dict[str, Any]:
+        prompt = build_prompt(state)
+        try:
+            # A list of messages, not {"messages": [...]} — the old call passed a
+            # dict, which a chat model cannot accept.
+            response = self.model.invoke(prompt, config=config)
+        except Exception as exc:
+            logger.exception("agent model call failed")
+            text = "I hit a problem working on that. Could you try again in a moment?"
+            return {"messages": [AIMessage(content=text)], "last_agent_output": text}
+
+        if not isinstance(response, AIMessage):
+            response = AIMessage(content=str(getattr(response, "content", response)))
+
+        return {"messages": [response], "last_agent_output": str(response.content or "")}
 
 
-class AgentRoutingNode:
-    def __call__(self, state: Any) -> str:
-        messages = getattr(state, "messages", []) or []
-        if not messages:
-            return "reflect"
-        ai_message = messages[-1]
-        tool_calls = getattr(ai_message, "tool_calls", None)
-        if tool_calls:
-            return "tool"
-        return "reflect"
+class ToolExecutorNode:
+    """Runs the model's tool calls.
+
+    Written by hand rather than using the prebuilt ToolNode for three reasons:
+
+    * Tool calls that already have a ToolMessage are skipped, so resuming after
+      an interrupt does not re-run work that already completed.
+    * Non-pausing tools run first and the pausing tool runs last, so an
+      interrupt cannot discard a sibling tool's result.
+    * Errors become a ToolMessage the model can read and recover from, while
+      authorization failures are surfaced as a refusal rather than a retry.
+    """
+
+    def __call__(self, state: GraphState, config: RunnableConfig = None) -> dict[str, Any] | Command:
+        messages = state.messages or []
+        last = messages[-1] if messages else None
+        tool_calls = list(getattr(last, "tool_calls", None) or [])
+        if not tool_calls:
+            return {}
+
+        answered = {
+            message.tool_call_id
+            for message in messages
+            if isinstance(message, ToolMessage) and message.tool_call_id
+        }
+        pending = [call for call in tool_calls if call.get("id") not in answered]
+        if not pending:
+            return {}
+
+        # Selection tools last: they interrupt, and an interrupt throws away the
+        # whole node's uncommitted work.
+        pending.sort(key=lambda call: call.get("name") == SELECTION_TOOL)
+
+        new_messages: list[Any] = []
+        extra_updates: dict[str, Any] = {}
+
+        for call in pending:
+            name = call.get("name") or ""
+            call_id = call.get("id") or ""
+            tool_fn = TOOLS_BY_NAME.get(name)
+
+            if tool_fn is None:
+                new_messages.append(
+                    ToolMessage(
+                        content=f"There is no tool called {name}. Use one of: {', '.join(TOOLS_BY_NAME)}.",
+                        tool_call_id=call_id,
+                        name=name,
+                        status="error",
+                    )
+                )
+                continue
+
+            args = dict(call.get("args") or {})
+            if name in _STATE_INJECTED_TOOLS:
+                args["state"] = state
+
+            try:
+                # Invoked in ToolCall form so LangChain fills InjectedToolCallId
+                # and wraps the return value in a ToolMessage for us.
+                result = tool_fn.invoke(
+                    {"name": name, "args": args, "id": call_id, "type": "tool_call"},
+                    config=config,
+                )
+            except GraphBubbleUp:
+                # A pause (or any other control-flow signal) must reach the
+                # runtime untouched. Catching it here would turn the interrupt
+                # into an error message and the conversation would never pause.
+                raise
+            except AuthorizationError as exc:
+                logger.warning("authorization guardrail blocked %s: %s", name, exc)
+                new_messages.append(
+                    ToolMessage(
+                        content=(
+                            "That was blocked: you can only read or change your own saved trips. "
+                            "Tell the user plainly and do not retry."
+                        ),
+                        tool_call_id=call_id,
+                        name=name,
+                        status="error",
+                    )
+                )
+                continue
+            except ToolError as exc:
+                new_messages.append(
+                    ToolMessage(content=f"Lookup failed: {exc}", tool_call_id=call_id, name=name, status="error")
+                )
+                continue
+            except Exception as exc:
+                logger.exception("tool %s failed", name)
+                new_messages.append(
+                    ToolMessage(
+                        content=f"That lookup could not be completed: {type(exc).__name__}.",
+                        tool_call_id=call_id,
+                        name=name,
+                        status="error",
+                    )
+                )
+                continue
+
+            # `request_user_selection` returns a Command carrying its own
+            # ToolMessage plus the resolved selection.
+            if isinstance(result, Command):
+                update = result.update or {}
+                for key, value in update.items():
+                    if key == "messages":
+                        new_messages.extend(value)
+                    else:
+                        extra_updates[key] = value
+                continue
+
+            if isinstance(result, ToolMessage):
+                new_messages.append(result)
+                continue
+
+            new_messages.append(
+                ToolMessage(
+                    content=result if isinstance(result, str) else json.dumps(result, default=str),
+                    tool_call_id=call_id,
+                    name=name,
+                )
+            )
+
+        return {
+            "messages": new_messages,
+            "tool_round_count": int(state.tool_round_count or 0) + 1,
+            **extra_updates,
+        }
 
 
-class ReflectRoutingNode:
-    def __call__(self, state: Any) -> str:
-        if getattr(state, "approved", False) is False and getattr(state, "reflection_count", 0) < 3:
-            return "agent"
-        return "persist_preferences"
+class FinalizeNode:
+    """Guardrail 2, output half: redact internals and disclose what was withheld."""
 
+    def __call__(self, state: GraphState) -> dict[str, Any]:
+        messages = state.messages or []
+        updates: dict[str, Any] = {}
 
-class ReflectNode:
-    MAX_REFLECTIONS = 3
+        # If the loop stopped while tool calls were still outstanding, answer them
+        # here. An AIMessage whose tool_calls have no matching ToolMessage makes
+        # the next turn's model request invalid, so this cannot be left dangling.
+        closing = self._close_dangling_tool_calls(messages)
+        if closing:
+            updates["messages"] = closing
 
-    def __call__(self, state: Any) -> dict[str, Any]:
-        state.reflection_count = int(getattr(state, "reflection_count", 0) or 0) + 1
-        draft = str(getattr(state, "last_agent_output", "") or "")
-        if _draft_has_internal_leaks(draft):
-            state.approved = False
-            state.critique = "Draft response leaked tool names, raw queries, endpoints, or credentials. Rewrite it without internal details."
-            state.last_agent_output = scrub_internals(draft)
-            return {"critique": state.critique, "approved": False, "last_agent_output": state.last_agent_output}
+        draft = state.last_agent_output or ""
+        if not draft.strip():
+            draft = (
+                "I ran out of steps before I could pull that together into an answer. "
+                "Want me to narrow it down and try again?"
+            )
 
-        model = _build_model().with_structured_output(RouteDecision)
-        prompt = (
-            "Review the draft output for factual completeness and for any leaked tool names, raw queries, API keys, or endpoints. "
-            "If it is safe and complete, return {\"route\": \"task\"}. If it leaks internals or is incomplete, return {\"route\": \"off_topic\"}."
-        )
-        response = model.invoke([HumanMessage(content=f"{prompt}\n\nDraft:\n{draft}")])
-        approved = response.route == "task"
-        critique = "Draft passed the rubric." if approved else "Draft leaked internal tool or API details; rewrite required."
+        verdict = apply_output_guardrail(draft, state.withheld_kinds)
+        if verdict.redacted:
+            logger.info("output guardrail redacted content on turn %s", state.turn_index)
 
-        if state.reflection_count >= self.MAX_REFLECTIONS:
-            approved = True
-            critique = "Reflection cap reached; final response scrubbed."
-        cleaned = scrub_internals(draft)
-        return {"critique": critique, "approved": approved, "last_agent_output": cleaned, "bot_response": cleaned}
+        updates["bot_response"] = verdict.text
+        updates["last_agent_output"] = verdict.text
+        return updates
+
+    @staticmethod
+    def _close_dangling_tool_calls(messages: list[Any]) -> list[Any]:
+        last = messages[-1] if messages else None
+        tool_calls = list(getattr(last, "tool_calls", None) or [])
+        if not tool_calls:
+            return []
+        answered = {
+            message.tool_call_id
+            for message in messages
+            if isinstance(message, ToolMessage) and message.tool_call_id
+        }
+        return [
+            ToolMessage(
+                content="Not run: this turn reached its limit on lookups.",
+                tool_call_id=call["id"],
+                name=call.get("name", ""),
+                status="error",
+            )
+            for call in tool_calls
+            if call.get("id") and call["id"] not in answered
+        ]
 
 
 class PersistPreferencesNode:
-    def __call__(self, state: Any) -> dict[str, Any]:
-        for key, value in (getattr(state, "preferences_to_persist", {}) or {}).items():
-            write_user_memory(_current_user_id(state), key, value)
-        return {"bot_response": scrub_internals(getattr(state, "last_agent_output", "") or getattr(state, "bot_response", "") or "")}
+    """Extract durable preferences worth remembering across threads."""
+
+    def __call__(self, state: GraphState, config: RunnableConfig = None) -> dict[str, Any]:
+        user_id = ((config or {}).get("configurable") or {}).get("auth_user_id") or state.user_id
+        if not user_id:
+            return {}
+
+        # Explicit writes queued by another node take priority.
+        for key, value in (state.preferences_to_persist or {}).items():
+            write_user_memory(user_id, key, value)
+
+        message = (state.message or "").strip()
+        if len(message) < 12:
+            return {"preferences_to_persist": {}}
+
+        extracted = self._extract(message)
+        for key, value in extracted.items():
+            write_user_memory(user_id, key, value)
+        if extracted:
+            logger.info("persisted user memory keys %s", sorted(extracted))
+
+        return {"preferences_to_persist": {}}
+
+    def _extract(self, message: str) -> dict[str, Any]:
+        """Pull durable preferences out of the message, if there are any.
+
+        Only lasting facts, never one-trip details — "I'm going to Rome in May"
+        is not a preference, "I always travel with my kids" is.
+        """
+        from pydantic import BaseModel, Field
+
+        class Preferences(BaseModel):
+            travel_style: str | None = None
+            preferred_stay_type: str | None = None
+            interests: list[str] | None = None
+            dietary: str | None = None
+            home_city: str | None = None
+            budget_level: str | None = None
+            pace: str | None = None
+            avoid: list[str] | None = None
+            hil_preference: str | None = Field(
+                default=None,
+                description="Set to 'always ask' if they want to choose from options themselves, 'decide for me' if they want the assistant to just proceed.",
+            )
+            accessibility: str | None = None
+
+        try:
+            model = fast_model().with_structured_output(Preferences)
+            result = model.invoke(
+                [
+                    SystemMessage(
+                        content=(
+                            "Extract only LASTING traveller preferences from the message — things "
+                            "that would still be true on their next trip. Leave a field null unless "
+                            "the message clearly states it. A specific destination, date or budget "
+                            "for one trip is NOT a preference. Return all nulls if there is nothing."
+                        )
+                    ),
+                    HumanMessage(content=message),
+                ]
+            )
+        except Exception as exc:
+            logger.debug("preference extraction unavailable: %s", exc)
+            return {}
+
+        return {
+            key: value
+            for key, value in result.model_dump().items()
+            if value not in (None, "", []) and key in ALLOWED_KEYS
+        }
