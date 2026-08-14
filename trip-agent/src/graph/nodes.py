@@ -40,7 +40,7 @@ from ..memory.user_memory import (
 )
 from ..tools.http import ToolError
 from .context import build_prompt
-from .state import GraphState
+from .state import GraphState, Selection, SelectionOption
 from .tools import ALL_TOOLS, SELECTION_TOOL, TOOLS_BY_NAME
 
 logger = logging.getLogger(__name__)
@@ -71,6 +71,84 @@ _SELECTION_CUES = (
 )
 
 
+def _close_abandoned_tool_calls(state: GraphState) -> tuple[list[Any], Selection | None]:
+    """Close out a tool call an interrupt left dangling from the PRIOR turn.
+
+    Happens when the user types a new message instead of answering a pending
+    pick — a real path in the UI, since the input box is not forced shut while
+    a picker is showing. Without this, the next model call includes an
+    AIMessage with tool_calls that have no matching ToolMessage, which every
+    provider rejects outright (verified live: a 400 "must be followed by tool
+    messages" from OpenAI). Runs at the start of every turn, before the new
+    HumanMessage is added, regardless of how the turn is ultimately routed.
+    """
+    messages = state.messages or []
+    if not messages:
+        return [], None
+    last = messages[-1]
+    tool_calls = list(getattr(last, "tool_calls", None) or [])
+    if not tool_calls:
+        return [], None
+
+    answered = {
+        message.tool_call_id
+        for message in messages
+        if isinstance(message, ToolMessage) and message.tool_call_id
+    }
+    pending = [call for call in tool_calls if call.get("id") not in answered]
+    if not pending:
+        return [], None
+
+    closers: list[Any] = []
+    abandoned_selection: Selection | None = None
+
+    for call in pending:
+        call_id = call.get("id") or ""
+        if call.get("name") == SELECTION_TOOL:
+            args = call.get("args") or {}
+            options: list[SelectionOption] = []
+            for index, raw in enumerate(args.get("options") or []):
+                if isinstance(raw, str):
+                    raw = {"label": raw}
+                options.append(
+                    SelectionOption(
+                        id=str(raw.get("id") or f"opt_{index + 1}"),
+                        label=str(raw.get("label") or raw.get("name") or f"Option {index + 1}"),
+                        description=raw.get("description"),
+                        payload=raw.get("payload") if isinstance(raw.get("payload"), dict) else {},
+                    )
+                )
+            abandoned_selection = Selection(
+                kind=args.get("kind", "destination"),
+                prompt=args.get("prompt", ""),
+                destination=args.get("destination"),
+                options=options,
+                skipped_ids=[option.id for option in options],
+                status="abandoned",
+                turn_index=int(state.turn_index or 0),
+                tool_call_id=call_id,
+            )
+            closers.append(
+                ToolMessage(
+                    content="The user moved on without picking from this list.",
+                    tool_call_id=call_id,
+                    name=SELECTION_TOOL,
+                    status="error",
+                )
+            )
+        else:
+            closers.append(
+                ToolMessage(
+                    content="Not completed: the user sent a new message before this finished.",
+                    tool_call_id=call_id,
+                    name=call.get("name", ""),
+                    status="error",
+                )
+            )
+
+    return closers, abandoned_selection
+
+
 def _recent_context(state: GraphState, limit: int = 4) -> str:
     """A few recent turns, given to the scope classifier so follow-ups make sense."""
     lines: list[str] = []
@@ -98,18 +176,30 @@ class PreprocessNode:
         updates["selection_nudges"] = 0
         updates["pending_directive"] = None
 
+        # Close out anything the PRIOR turn left dangling (e.g. the user typed
+        # past a pending pick instead of answering it). Must happen before any
+        # scope branch returns, so a corrupted history never reaches the model
+        # even on an off-topic or smalltalk follow-up.
+        closers, abandoned_selection = _close_abandoned_tool_calls(state)
+        if closers:
+            updates["messages"] = list(closers)
+        if abandoned_selection:
+            updates["selections"] = [abandoned_selection]
+
         verdict = classify_scope(message, _recent_context(state))
         updates["scope"] = verdict.label
         updates["scope_reason"] = verdict.reason
 
         if verdict.label == "out_of_scope":
-            # Refuse without adding the message to history — an off-topic turn
-            # should not pollute the travel context of later turns.
+            # Refuse without adding the user's message to history — an
+            # off-topic turn should not pollute the travel context of later
+            # turns — but the dangling-tool-call closers above still apply.
             updates["bot_response"] = verdict.refusal
             return updates
 
         if verdict.label == "smalltalk":
-            updates["messages"] = [HumanMessage(content=message)] if message else []
+            if message:
+                updates["messages"] = [*closers, HumanMessage(content=message)]
             return updates
 
         split = split_request(message)
@@ -129,7 +219,7 @@ class PreprocessNode:
         # The agent sees the sanitised request, not the raw one, so a bolted-on
         # "and send me the query" never reaches the model at all.
         if message:
-            updates["messages"] = [HumanMessage(content=updates["allowed_request"])]
+            updates["messages"] = [*closers, HumanMessage(content=updates["allowed_request"])]
 
         user_id = ((config or {}).get("configurable") or {}).get("auth_user_id") or state.user_id
         summary = get_user_memory_summary(user_id)

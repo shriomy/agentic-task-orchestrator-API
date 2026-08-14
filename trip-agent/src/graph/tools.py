@@ -1,6 +1,6 @@
 """Tool definitions exposed to the agent.
 
-Two things to note about identity and about pausing:
+Three things to note about identity, pausing, and confirmation:
 
 * The favorites tools take NO user_id argument. The acting user is read from the
   runtime config, which the API layer fills in from the verified Supabase JWT.
@@ -10,11 +10,21 @@ Two things to note about identity and about pausing:
 * `request_user_selection` calls `interrupt()`. It also returns a ToolMessage
   alongside the state update: a tool_call with no matching ToolMessage makes the
   next model request invalid, which is why the earlier version broke on resume.
+
+* Destructive favorites actions (delete, section removal) confirm with the user
+  BEFORE acting, and that confirmation is enforced inside the tool itself rather
+  than left to the system prompt. The same reliability gap that made HIL pausing
+  need code-level enforcement (see require_selection in nodes.py) applies here:
+  a model instructed to "confirm before deleting" will not always do it. Calling
+  `interrupt()` is not limited to a dedicated tool — any tool function can pause
+  mid-execution, so these tools raise their own yes/no confirmation and only
+  proceed once it comes back affirmative.
 """
 
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import Annotated, Any, Literal
 
 from langchain_core.messages import ToolMessage
@@ -23,6 +33,7 @@ from langchain_core.tools import InjectedToolCallId, tool
 from langgraph.prebuilt import InjectedState
 from langgraph.types import Command, interrupt
 
+from ..db.mongo import resolve_section
 from ..guardrails.authorization import AuthorizationError, require_user_id
 from ..tools.activities import search_events
 from ..tools.destinations import search_destinations
@@ -296,6 +307,30 @@ def update_trip_favorite_tool(
     )
 
 
+def _confirm(reason: str, *, kind: str, destination: str | None) -> bool:
+    """Pause for a yes/no and return whether the user confirmed.
+
+    Called from inside a destructive tool, before it touches the database.
+    `interrupt()` works from any tool function, not only a dedicated one — it
+    just pauses this call until the graph is resumed.
+    """
+    reply = interrupt(
+        {
+            "type": "selection",
+            "selection_id": f"confirm_{uuid.uuid4().hex[:10]}",
+            "kind": "confirmation",
+            "destination": destination,
+            "reason": reason,
+            "options": [
+                {"id": "yes", "label": f"Yes, {kind}"},
+                {"id": "no", "label": "No, keep it"},
+            ],
+        }
+    )
+    picked = {str(item).strip().lower() for item in _picked_ids_from(reply, [])}
+    return "yes" in picked
+
+
 @tool("remove_trip_favorite_section")
 def remove_trip_favorite_section_tool(
     destination: str,
@@ -307,7 +342,8 @@ def remove_trip_favorite_section_tool(
 
     This is the tool for "delete my Paris trip's hotels": it clears the
     accommodations and leaves the saved places and events exactly as they were.
-    Do not use delete_trip_favorite for that.
+    Do not use delete_trip_favorite for that. Pauses to confirm before making
+    the change — just call it, there is no need to confirm yourself first.
 
     Args:
         destination: Which saved trip, e.g. "Paris".
@@ -316,6 +352,16 @@ def remove_trip_favorite_section_tool(
             whole section.
     """
     user_id = acting_user_id(config, operation="remove_favorite_section")
+    resolved = resolve_section(section) or section
+    what = f"{len(item_ids)} item(s) from" if item_ids else "all of"
+    confirmed = _confirm(
+        f"Remove {what} the {resolved} in your {destination} trip? "
+        "The rest of that trip stays as it is.",
+        kind=f"remove the {resolved}",
+        destination=destination,
+    )
+    if not confirmed:
+        return {"action": "cancelled", "destination": destination, "section": resolved}
     return remove_favorite_section(user_id, destination, section, item_ids=item_ids)
 
 
@@ -325,11 +371,21 @@ def delete_trip_favorite_tool(destination: str, config: RunnableConfig = None) -
 
     Only for when the user wants the whole destination gone. If they named one
     part of it (the hotels, the events), use remove_trip_favorite_section.
+    Pauses to confirm before deleting — just call it, there is no need to
+    confirm yourself first.
 
     Args:
         destination: Which saved trip to delete, e.g. "Paris".
     """
     user_id = acting_user_id(config, operation="delete_favorite")
+    confirmed = _confirm(
+        f"Delete your entire {destination} trip — all its places, events and stays? "
+        "This can't be undone.",
+        kind="delete it",
+        destination=destination,
+    )
+    if not confirmed:
+        return {"action": "cancelled", "destination": destination}
     return delete_favorite(user_id, destination)
 
 
