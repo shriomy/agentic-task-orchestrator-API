@@ -1,0 +1,11 @@
+.env
+__pycache__/
+.pytest_cache/
+.venv/
+venv/
+dist/
+build/
+*.pyc
+trip-agent/.env
+trip-agent/.env.example
+tool_query.md
