@@ -281,19 +281,25 @@ def update_trip_favorite_tool(
     events: list[dict] | None = None,
     accommodations: list[dict] | None = None,
     notes: str | None = None,
-    replace_sections: bool = False,
     config: RunnableConfig = None,
 ) -> dict:
-    """Change a saved trip. Sections you do not mention are left untouched.
+    """Add to a saved trip. Sections you do not mention are left untouched, and
+    within a mentioned section your items are ADDED to what's already saved —
+    this can never drop an existing place, event or stay.
+
+    To remove or swap out something instead of adding to it, use
+    remove_trip_favorite_section for what should go, then call this tool (or
+    save_trip_favorite) to add the replacement. There is no single call that
+    overwrites a whole section — that was a real bug once (a user asked to add
+    a second hotel and the first one silently vanished), so it is not exposed
+    here anymore.
 
     Args:
         destination: Which saved trip to change, e.g. "Paris".
-        places: Place objects to add (or to replace with).
-        events: Event objects to add (or to replace with).
-        accommodations: Accommodation objects to add (or to replace with).
+        places: Place objects to add.
+        events: Event objects to add.
+        accommodations: Accommodation objects to add.
         notes: Replacement note text.
-        replace_sections: True overwrites the sections you supplied instead of
-            merging into them.
     """
     user_id = acting_user_id(config, operation="update_favorite")
     return update_favorite(
@@ -303,7 +309,7 @@ def update_trip_favorite_tool(
         events=events,
         accommodations=accommodations,
         notes=notes,
-        replace_sections=replace_sections,
+        replace_sections=False,
     )
 
 

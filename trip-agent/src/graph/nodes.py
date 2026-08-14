@@ -287,15 +287,29 @@ class SummarizationNode:
             return {}
 
         try:
-            from langmem.short_term.summarization import summarize_messages
+            from langmem.short_term.summarization import RunningSummary, summarize_messages
         except ImportError:
             logger.debug("langmem not installed; skipping summarization")
             return {}
 
+        running_summary = state.running_summary
+        if isinstance(running_summary, dict):
+            # A checkpoint round-trip through a serializer that doesn't know
+            # RunningSummary turns it back into a plain dict — summarize_messages
+            # needs the real dataclass (it reads .summarized_message_ids). The
+            # checkpointer's allowlist is the real fix; this is a second layer
+            # so an already-corrupted or future-library-version checkpoint
+            # degrades to "start summarizing fresh" instead of crashing outright.
+            try:
+                running_summary = RunningSummary(**running_summary)
+            except TypeError:
+                logger.warning("running_summary checkpoint was unreadable; starting a fresh summary")
+                running_summary = None
+
         try:
             result = summarize_messages(
                 messages,
-                running_summary=state.running_summary,
+                running_summary=running_summary,
                 model=fast_model(),
                 max_tokens=settings.summary_token_threshold,
                 max_summary_tokens=512,
@@ -304,7 +318,11 @@ class SummarizationNode:
             logger.warning("summarization failed, keeping full history: %s", exc)
             return {}
 
-        if result.running_summary is None or result.running_summary is state.running_summary:
+        if result.running_summary is None or result.running_summary is running_summary:
+            # Compare against the (possibly just-coerced) local, not state.running_summary
+            # directly — after coercion those are never the same object even when
+            # summarize_messages left the summary untouched, which would otherwise
+            # make this look "changed" every turn and needlessly rebuild history.
             return {}  # under budget; nothing was compressed
 
         # langmem prepends its own SystemMessage carrying the summary; drop it,

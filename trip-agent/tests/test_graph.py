@@ -840,6 +840,67 @@ def test_deleting_a_favorite_pauses_for_confirmation_before_touching_the_db(harn
     assert result["bot_response"] == "Deleted your Paris trip."
 
 
+def test_update_trip_favorite_has_no_replace_sections_argument():
+    """Regression: a user asked to add a second hotel to a saved trip and the
+    first one silently vanished. Root cause: update_trip_favorite_tool exposed
+    a model-settable `replace_sections` flag, and the model set it True on an
+    "add" request without repeating the existing items. The fix removes the
+    flag from the tool's schema entirely — there is no argument left for a
+    model to express a full-section overwrite through, regardless of its
+    reasoning that turn."""
+    from src.graph.tools import update_trip_favorite_tool
+
+    assert "replace_sections" not in update_trip_favorite_tool.args
+
+
+def test_update_trip_favorite_tool_always_merges_even_with_a_single_item(harness, monkeypatch):
+    """The direct end-to-end reproduction of the reported bug: 'add Ambassador
+    Hotel' with only the new hotel in the call must never drop Grand Hyatt."""
+    updates: list[dict] = []
+
+    def fake_update_favorite(user_id, destination, places=None, events=None, accommodations=None, notes=None, replace_sections=False):
+        assert replace_sections is False, "the tool must never be able to force a replace"
+        updates.append({"accommodations": accommodations, "replace_sections": replace_sections})
+        # Simulate the real merge: existing item survives alongside the new one.
+        return {
+            "action": "updated",
+            "favorite": {
+                "destination": {"name": destination},
+                "accommodations": [
+                    {"hotel_id": "H100", "name": "Grand Hyatt Bangkok"},
+                    *(accommodations or []),
+                ],
+            },
+        }
+
+    monkeypatch.setattr("src.graph.tools.update_favorite", fake_update_favorite)
+
+    graph, model, _ = harness(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    tool_call(
+                        "update_trip_favorite",
+                        {"destination": "Bangkok", "accommodations": [{"name": "Ambassador Hotel"}]},
+                        "c1",
+                    )
+                ],
+            ),
+            AIMessage(content="Added Ambassador Hotel to your Bangkok trip."),
+        ]
+    )
+    _patch_agent(graph, model)
+
+    result = graph.invoke(
+        {"thread_id": "t20", "user_id": USER, "message": "add Ambassador Hotel as well to bangkok trip"},
+        config={"configurable": {"thread_id": "t20", **CONFIG_BASE}},
+    )
+
+    assert updates == [{"accommodations": [{"name": "Ambassador Hotel"}], "replace_sections": False}]
+    assert result["bot_response"] == "Added Ambassador Hotel to your Bangkok trip."
+
+
 def test_a_tool_call_with_no_verified_identity_is_refused(harness):
     graph, model, _ = harness(
         [

@@ -25,21 +25,33 @@ _lock = threading.Lock()
 
 
 def build_serializer() -> Any:
-    """Serializer with strict msgpack plus an allowlist for our own state types.
+    """Serializer with strict msgpack plus an allowlist for every custom type
+    that ends up in GraphState.
 
     LangGraph's default is permissive-with-a-warning and is due to start
-    rejecting unregistered types. Naming `Selection` / `SelectionOption`
-    explicitly both silences that and keeps deserialization restricted, which
-    matters because the checkpoint database can reconstruct Python objects.
+    rejecting unregistered types. An explicit allowlist silences that AND keeps
+    deserialization restricted — but every type actually reachable from state
+    must be named, or it silently comes back as a plain dict on the next load
+    instead of the real object. That happened here: `RunningSummary` (langmem's
+    running-summary dataclass, held in `state.running_summary`) was missing, so
+    a checkpoint round-trip turned it into a dict, and passing that dict back
+    into `summarize_messages()` blew up with `'dict' object has no attribute
+    'summarized_message_ids'` on the second summarization of a thread.
     """
     from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
     from ..graph.state import Selection, SelectionOption
 
+    allowed: list[Any] = [Selection, SelectionOption]
     try:
-        return JsonPlusSerializer(
-            allowed_msgpack_modules=(Selection, SelectionOption),
-        ).with_msgpack_allowlist([Selection, SelectionOption])
+        from langmem.short_term.summarization import RunningSummary
+
+        allowed.append(RunningSummary)
+    except ImportError:
+        pass
+
+    try:
+        return JsonPlusSerializer(allowed_msgpack_modules=tuple(allowed)).with_msgpack_allowlist(allowed)
     except TypeError:
         # Older langgraph without the allowlist parameter.
         return JsonPlusSerializer()
