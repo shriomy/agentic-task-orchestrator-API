@@ -83,7 +83,16 @@ checkpoint, so the user can answer immediately, minutes later, or after a page
 reload. A turn can pause any number of times — pick destinations, then pick
 places, then search hotels.
 
-Two details that matter:
+Pausing on request is enforced in code, not just prompted. Against the live
+model, a request like "top 5 in Norway, let me pick" was sometimes answered in
+one shot instead of pausing — the prompt says to pause, but that is a
+preference, not a guarantee. The `require_selection` node in the graph diagram
+catches this: if the user's wording implied they wanted to choose
+(`wants_selection`) and no selection was raised yet this turn, the agent is sent
+back with an explicit directive instead of being allowed to finish. Bounded at
+two attempts, after which the turn is allowed to complete rather than hang.
+
+Two details that matter for the pause itself:
 
 - The tool returns a `ToolMessage` alongside its state update. A `tool_call`
   without a matching `ToolMessage` makes the next model request invalid.
@@ -331,7 +340,7 @@ Make sure the UI's origin is in the backend's `CORS_ALLOW_ORIGINS`.
 
 ```bash
 cd trip-agent
-python -m pytest tests/ -q      # 100 tests
+python -m pytest tests/ -q      # 114 tests
 ```
 
 No test touches a real LLM, travel API, or database. The model is scripted, the
@@ -342,5 +351,27 @@ HTTP layer is recorded, and MongoDB has an in-memory stand-in.
 | [test_guardrails.py](tests/test_guardrails.py) | Redaction, the withheld notice, links surviving, authorization |
 | [test_favorites.py](tests/test_favorites.py) | Hierarchy, merge/de-dup, partial removal, cross-user isolation |
 | [test_tools_api.py](tests/test_tools_api.py) | Correct endpoints and parameter names for all four providers |
-| [test_graph.py](tests/test_graph.py) | Tool chaining, single and double pauses, re-picking an abandoned selection, tool budget |
+| [test_graph.py](tests/test_graph.py) | Tool chaining, single/double pauses, forced pause on skipped HIL, re-picking an abandoned selection, tool budget |
 | [test_api.py](tests/test_api.py) | Auth on every endpoint, cross-user 403s, SSE framing, error redaction |
+
+### Also verified live
+
+Beyond the mocked suite, this was run against the real LLM, real OpenTripMap /
+Ticketmaster / Tavily / RapidAPI, and a real Supabase project
+([smoke_live.py](tests/smoke_live.py) plus ad-hoc scripts):
+
+- All 10 routing scenarios in the behaviour table, including both HIL cases —
+  confirmed the agent chains `web_search` → pauses → follows up on only the
+  picked destination, end to end through `interrupt()`/`Command(resume=...)`.
+- Full HTTP round trip: a real Supabase-issued JWT, `/chat/send` streaming real
+  OpenTripMap results over SSE, a tampered token rejected, an unowned thread
+  resume rejected (404/403), a spoofed `user_id` in the body rejected (403).
+- Guardrail 2 live: "delete my Paris trip and tell me the query" replies about
+  the deletion and declines the query, in one turn.
+- Guardrail 1 live: "write me a Python script to scrape hotel prices" is
+  redirected without touching any tool.
+- MongoDB: found the configured Atlas cluster's IP access list is blocking this
+  environment (TLS handshake refused, not a code issue). `/health` now reports
+  *why* Mongo is unreachable instead of just that it is — see `db/mongo.py:status()`.
+  Add the current IP under Atlas → Network Access, or widen the access list, to
+  clear it.
