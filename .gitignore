@@ -6,3 +6,5 @@ venv/
 dist/
 build/
 *.pyc
+trip-agent/.env
+trip-agent/.env.example
