@@ -95,6 +95,9 @@ class PreprocessNode:
             "last_agent_output": None,
         }
 
+        updates["selection_nudges"] = 0
+        updates["pending_directive"] = None
+
         verdict = classify_scope(message, _recent_context(state))
         updates["scope"] = verdict.label
         updates["scope_reason"] = verdict.reason
@@ -382,6 +385,44 @@ class ToolExecutorNode:
         }
 
 
+class RequireSelectionNode:
+    """Send the agent back when it skipped a pause the user asked for.
+
+    The prompt alone is not reliable enough here: asked for "top 5 in Norway and
+    let me pick some", a smaller model will happily search and then answer the
+    whole thing in one go. Since "pause when the user asks to choose" is a
+    behavioural requirement rather than a preference, it is enforced in code.
+
+    Bounded by `selection_nudges` — after two attempts the turn is allowed to
+    finish normally. Failing to pause is worse than not pausing, but hanging is
+    worse than both.
+    """
+
+    MAX_NUDGES = 2
+
+    def __call__(self, state: GraphState) -> dict[str, Any]:
+        attempt = int(state.selection_nudges or 0) + 1
+        logger.info(
+            "agent skipped a requested pause on turn %s; nudge %s/%s",
+            state.turn_index,
+            attempt,
+            self.MAX_NUDGES,
+        )
+        return {
+            "selection_nudges": attempt,
+            "pending_directive": (
+                "STOP — you answered without pausing, but the user explicitly asked to pick "
+                "from the results first. Do not write a final answer yet. Call "
+                "request_user_selection now, passing the items you just found as options: "
+                "each needs an id, a short label, and the full result object as `payload`. "
+                "Once they have picked, continue with only their picks."
+            ),
+            # Clear the draft so a half-finished answer cannot leak out if the
+            # nudge budget runs out on the next pass.
+            "last_agent_output": "",
+        }
+
+
 class FinalizeNode:
     """Guardrail 2, output half: redact internals and disclose what was withheld."""
 
@@ -409,6 +450,8 @@ class FinalizeNode:
 
         updates["bot_response"] = verdict.text
         updates["last_agent_output"] = verdict.text
+        # The directive was for one agent call only.
+        updates["pending_directive"] = None
         return updates
 
     @staticmethod

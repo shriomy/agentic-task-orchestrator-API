@@ -28,18 +28,22 @@ from src.graph.tools import SELECTION_TOOL  # noqa: E402
 
 USER = "smoke-user"
 
-# (label, message, expected tools, should it pause?)
+# (label, message, required tools, should it pause?, forbidden tools)
+#
+# `forbidden` is what enforces "do not answer more than was asked" — the spec
+# says case 1 is web search ONLY, so an attraction lookup there is a failure,
+# not a bonus.
 CASES = [
-    ("1  country + season", "What are top 5 tourist destinations in Norway during this season?", {"web_search"}, False),
-    ("2  country + places", "What are top 5 tourist destinations in Norway this season and tell me what I can go visit in those places?", {"web_search", "search_places"}, False),
-    ("3  country + pick + places", "What are top 5 tourist destinations in Norway this season and let me pick some of them to get more ideas on places I can go visit in those places", {"web_search", SELECTION_TOOL}, True),
-    ("4  city only", "What are the places to visit in Moscow?", {"search_places"}, False),
-    ("5  events only", "What are the events happening in Paris this weekend?", {"search_events"}, False),
-    ("6  country + stays", "Tell me places to go visit in Thailand and accommodations nearby each", {"web_search", "search_accommodations"}, False),
-    ("7  country + pick + stays", "Tell me places to go visit in Thailand so I can choose a few of them to decide my accommodations nearby each", {"web_search", SELECTION_TOOL}, True),
-    ("8  city places + events", "Send me Shanghai's best places to visit along with events next week", {"search_places", "search_events"}, False),
-    ("9  packing (no travel words)", "What should I pack?", set(), False),
-    ("10 out of scope", "Write me a Python script to scrape hotel prices", set(), False),
+    ("1  country + season", "What are top 5 tourist destinations in Norway during this season?", {"web_search"}, False, {"search_places", "search_events", "search_accommodations"}),
+    ("2  country + places", "What are top 5 tourist destinations in Norway this season and tell me what I can go visit in those places?", {"web_search", "search_places"}, False, {"search_accommodations"}),
+    ("3  country + pick + places", "What are top 5 tourist destinations in Norway this season and let me pick some of them to get more ideas on places I can go visit in those places", {"web_search", SELECTION_TOOL}, True, set()),
+    ("4  city only", "What are the places to visit in Moscow?", {"search_places"}, False, {"search_events", "search_accommodations"}),
+    ("5  events only", "What are the events happening in Paris this weekend?", {"search_events"}, False, {"search_accommodations"}),
+    ("6  country + stays", "Tell me places to go visit in Thailand and accommodations nearby each", {"web_search", "search_accommodations"}, False, {"search_events"}),
+    ("7  country + pick + stays", "Tell me places to go visit in Thailand so I can choose a few of them to decide my accommodations nearby each", {"web_search", SELECTION_TOOL}, True, set()),
+    ("8  city places + events", "Send me Shanghai's best places to visit along with events next week", {"search_places", "search_events"}, False, {"search_accommodations"}),
+    ("9  packing (no travel words)", "What should I pack?", set(), False, {"search_accommodations", "search_events"}),
+    ("10 out of scope", "Write me a Python script to scrape hotel prices", set(), False, {"web_search", "search_places", "search_events", "search_accommodations"}),
 ]
 
 
@@ -52,7 +56,7 @@ def _printable(text: str) -> str:
 
 
 def run(case_index: int, allow_hil: bool) -> bool:
-    label, message, expected, expect_pause = CASES[case_index]
+    label, message, expected, expect_pause, forbidden = CASES[case_index]
     if expect_pause and not allow_hil:
         print(f"SKIP {label}  (pass --hil to include)")
         return True
@@ -88,20 +92,23 @@ def run(case_index: int, allow_hil: bool) -> bool:
         return False
 
     used = set(called)
-    tools_ok = expected.issubset(used) if expected else True
+    missing = expected - used
+    overreach = used & forbidden
     pause_ok = paused == expect_pause
-    ok = tools_ok and pause_ok
+    ok = not missing and not overreach and pause_ok
 
     print(f"{'PASS' if ok else 'FAIL'} {label}")
     print(f"     tools used : {sorted(used) or '(none)'}")
     if expected:
-        print(f"     expected   : {sorted(expected)}")
+        print(f"     required   : {sorted(expected)}")
     print(f"     paused     : {paused}   (expected {expect_pause})")
     print(f"     reply      : {_printable(reply[:200])}")
-    if not tools_ok:
-        print(f"     >> missing tools: {sorted(expected - used)}")
+    if missing:
+        print(f"     >> under-reach, never called: {sorted(missing)}")
+    if overreach:
+        print(f"     >> over-reach, should not have called: {sorted(overreach)}")
     if not pause_ok:
-        print("     >> pause behaviour wrong")
+        print(f"     >> pause behaviour wrong (expected {expect_pause}, got {paused})")
     print()
     return ok
 

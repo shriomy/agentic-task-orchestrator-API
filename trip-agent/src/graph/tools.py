@@ -367,10 +367,20 @@ def request_user_selection_tool(
         if isinstance(raw, str):
             raw = {"label": raw}
         label = str(raw.get("label") or raw.get("name") or f"Option {index + 1}")
+
         payload = raw.get("payload")
         if not isinstance(payload, dict):
             # Keep the whole object when the model didn't nest it under payload.
-            payload = {k: v for k, v in raw.items() if k not in {"id", "label", "description"}}
+            payload = {k: v for k, v in raw.items() if k not in {"id", "label", "description", "payload"}}
+        # Never leave a payload empty. Models frequently omit it, and an empty
+        # one means "save these as favorites" later has nothing real to write.
+        payload = dict(payload)
+        payload.setdefault("name", label)
+        if raw.get("description"):
+            payload.setdefault("description", raw["description"])
+        if destination:
+            payload.setdefault("destination", destination)
+
         normalised.append(
             SelectionOption(
                 id=str(raw.get("id") or f"opt_{index + 1}"),

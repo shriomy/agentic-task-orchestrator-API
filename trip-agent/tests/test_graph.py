@@ -121,6 +121,62 @@ def test_agent_router_loops_only_while_tools_are_requested():
     assert route_after_agent(plain) == "finalize"
 
 
+def test_agent_router_sends_back_an_agent_that_skipped_a_requested_pause():
+    state = GraphState(
+        messages=[AIMessage(content="Here are all five, plus everything in them.")],
+        wants_selection=True,
+        tool_round_count=1,
+        turn_index=1,
+    )
+    assert route_after_agent(state) == "require_selection"
+
+
+def test_the_pause_nudge_is_bounded_so_a_turn_cannot_hang():
+    from src.graph.nodes import RequireSelectionNode
+
+    state = GraphState(
+        messages=[AIMessage(content="Still not pausing.")],
+        wants_selection=True,
+        tool_round_count=1,
+        turn_index=1,
+        selection_nudges=RequireSelectionNode.MAX_NUDGES,
+    )
+    assert route_after_agent(state) == "finalize"
+
+
+def test_no_nudge_before_any_lookup_has_run():
+    """There is nothing to offer as options until a tool has returned something."""
+    state = GraphState(
+        messages=[AIMessage(content="Which country did you have in mind?")],
+        wants_selection=True,
+        tool_round_count=0,
+        turn_index=1,
+    )
+    assert route_after_agent(state) == "finalize"
+
+
+def test_no_nudge_once_a_pause_has_already_happened_this_turn():
+    state = GraphState(
+        messages=[AIMessage(content="Here's what to see in Bergen.")],
+        wants_selection=True,
+        tool_round_count=2,
+        turn_index=3,
+        selections=[Selection(turn_index=3, status="answered", picked_ids=["o1"])],
+    )
+    assert route_after_agent(state) == "finalize"
+
+
+def test_a_pause_answered_on_an_earlier_turn_does_not_count_for_this_one():
+    state = GraphState(
+        messages=[AIMessage(content="Here you go.")],
+        wants_selection=True,
+        tool_round_count=1,
+        turn_index=5,
+        selections=[Selection(turn_index=2, status="answered", picked_ids=["o1"])],
+    )
+    assert route_after_agent(state) == "require_selection"
+
+
 def test_agent_router_stops_at_the_tool_budget():
     from src.config import settings
 
@@ -320,6 +376,97 @@ def test_two_pauses_in_a_single_turn(harness):
     assert all(selection.status == "answered" for selection in final["selections"])
     stay_lookups = [args for name, args in calls if name == "search_accommodations"]
     assert stay_lookups[0]["location"] == "Krabi"
+
+
+def test_an_agent_that_skips_a_requested_pause_is_forced_to_pause(harness):
+    """End-to-end: the model answers straight away, the graph makes it pause anyway.
+
+    Prompting alone did not achieve this reliably in live runs, so the behaviour
+    is enforced by the router.
+    """
+    graph, model, _ = harness(
+        [
+            AIMessage(content="", tool_calls=[tool_call("web_search", {"query": "top destinations Norway"}, "c1")]),
+            # Skips the pause and answers everything.
+            AIMessage(content="Here are all five, and everything to see in each."),
+            # After the nudge, it complies.
+            AIMessage(
+                content="",
+                tool_calls=[
+                    tool_call(
+                        "request_user_selection",
+                        {
+                            "prompt": "Which should I dig into?",
+                            "kind": "destination",
+                            "options": [{"id": "o1", "label": "Tromso"}, {"id": "o2", "label": "Bergen"}],
+                        },
+                        "c2",
+                    )
+                ],
+            ),
+            AIMessage(content="Here's what to see in Bergen."),
+        ]
+    )
+    _patch_agent(graph, model)
+    config = {"configurable": {"thread_id": "t14", **CONFIG_BASE}}
+
+    result = graph.invoke(
+        {"thread_id": "t14", "user_id": USER, "message": "top 5 in Norway and let me pick some of them"},
+        config=config,
+    )
+
+    assert "__interrupt__" in result, "the graph should have forced a pause"
+    assert result["selection_nudges"] == 1
+    # The skipped-over draft must not have leaked out as the reply.
+    assert not result.get("bot_response")
+
+    final = graph.invoke(Command(resume={"selected_options": ["o2"]}), config=config)
+    assert final["bot_response"] == "Here's what to see in Bergen."
+
+
+def test_the_forced_pause_gives_up_rather_than_looping_forever(harness):
+    """A model that never complies must still produce an answer."""
+    graph, model, _ = harness(
+        [
+            AIMessage(content="", tool_calls=[tool_call("web_search", {"query": "x"}, "c1")]),
+            AIMessage(content="Refusing to pause, attempt 1."),
+            AIMessage(content="Refusing to pause, attempt 2."),
+            AIMessage(content="Refusing to pause, attempt 3."),
+        ]
+    )
+    _patch_agent(graph, model)
+
+    result = graph.invoke(
+        {"thread_id": "t15", "user_id": USER, "message": "top 5 in Norway, let me pick"},
+        config={"configurable": {"thread_id": "t15", **CONFIG_BASE}},
+    )
+
+    assert "__interrupt__" not in result
+    assert result["selection_nudges"] == 2  # capped
+    assert result["bot_response"], "the turn must still answer rather than hang"
+
+
+@pytest.mark.parametrize(
+    "message,expected",
+    [
+        ("top 5 in Norway and let me pick some of them", True),
+        ("places in Thailand so I can choose a few for accommodation", True),
+        ("give me options for hotels in Rome", True),
+        ("ask me which ones I want", True),
+        ("Shanghai's best places to visit along with events next week", False),
+        ("what are the places to visit in Moscow", False),
+        ("events in Paris this weekend", False),
+    ],
+)
+def test_selection_intent_is_detected_from_the_users_wording(harness, message, expected):
+    graph, model, _ = harness([AIMessage(content="ok")])
+    _patch_agent(graph, model)
+
+    result = graph.invoke(
+        {"thread_id": f"t-cue-{abs(hash(message))}", "user_id": USER, "message": message},
+        config={"configurable": {"thread_id": f"t-cue-{abs(hash(message))}", **CONFIG_BASE}},
+    )
+    assert result["wants_selection"] is expected
 
 
 def test_picking_nothing_does_not_silently_continue_with_everything(harness):

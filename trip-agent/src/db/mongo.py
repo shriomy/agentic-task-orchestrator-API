@@ -29,11 +29,23 @@ def get_client() -> Any:
             raise RuntimeError("pymongo is required for favorites persistence.") from exc
         if not settings.mongodb_uri:
             raise RuntimeError("MONGODB_URI is required for favorites persistence.")
-        _client = MongoClient(
-            settings.mongodb_uri,
-            serverSelectionTimeoutMS=settings.request_timeout_seconds * 1000,
-            tz_aware=True,
-        )
+
+        kwargs: dict[str, Any] = {
+            "serverSelectionTimeoutMS": settings.request_timeout_seconds * 1000,
+            "tz_aware": True,
+            "appname": "trip-organiser-agent",
+        }
+        if settings.mongodb_uri.startswith("mongodb+srv://"):
+            # Atlas over TLS on Windows often cannot find a usable CA in the
+            # system store; certifi's bundle is the reliable one.
+            try:
+                import certifi
+
+                kwargs["tlsCAFile"] = certifi.where()
+            except ImportError:
+                pass
+
+        _client = MongoClient(settings.mongodb_uri, **kwargs)
         return _client
 
 
@@ -70,6 +82,34 @@ def ping() -> bool:
         return True
     except Exception:
         return False
+
+
+def status() -> dict[str, Any]:
+    """Reachability plus a hint at the cause, for the /health endpoint.
+
+    Worth distinguishing, because the three common failures need three different
+    fixes and the raw pymongo error is a wall of text that buries which one it is.
+    """
+    if not settings.mongodb_uri:
+        return {"connected": False, "reason": "MONGODB_URI is not set."}
+    try:
+        get_client().admin.command("ping")
+        return {"connected": True}
+    except Exception as exc:
+        text = str(exc)
+        if "TLSV1_ALERT_INTERNAL_ERROR" in text or "SSL handshake failed" in text:
+            reason = (
+                "TLS handshake refused by the server. Usually this machine's IP is not on "
+                "the Atlas access list (Network Access -> Add Current IP Address), or the "
+                "cluster is paused."
+            )
+        elif "Authentication failed" in text or "bad auth" in text:
+            reason = "Credentials in MONGODB_URI were rejected."
+        elif "ServerSelectionTimeoutError" in type(exc).__name__ or "timed out" in text:
+            reason = "Could not reach the cluster before the timeout."
+        else:
+            reason = f"{type(exc).__name__} while connecting."
+        return {"connected": False, "reason": reason}
 
 
 # --- Document shape ---------------------------------------------------------

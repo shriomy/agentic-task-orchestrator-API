@@ -28,7 +28,7 @@ from pydantic import BaseModel, Field
 
 from .auth import AuthError, AuthenticatedUser, verify_access_token
 from .config import settings
-from .db.mongo import ping as mongo_ping
+from .db.mongo import status as mongo_status
 from .graph.graph import get_graph
 from .graph.tools import SELECTION_TOOL
 from .guardrails.authorization import AuthorizationError
@@ -441,11 +441,14 @@ def favorites_delete(
 
 @app.get("/health")
 def health() -> dict[str, Any]:
+    """What's actually wired up. Reports why a dependency is down, not just that
+    it is, since each failure mode needs a different fix."""
     return {
         "status": "ok",
         "supabase": supabase_available(),
-        "mongodb": mongo_ping() if settings.mongodb_uri else False,
+        "mongodb": mongo_status(),
         "tracing": bool(settings.langsmith_api_key and settings.langsmith_tracing),
+        "checkpointer": "postgres" if settings.supabase_db_url else "in-memory (not durable)",
         "tools": {
             "web_search": bool(settings.tavily_api_key),
             "places": bool(settings.opentripmap_api_key),

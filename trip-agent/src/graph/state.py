@@ -111,6 +111,15 @@ class GraphState(BaseModel):
     selections: Annotated[list[Selection], merge_selections] = Field(default_factory=list)
     # Set when the user's phrasing implies they want to choose ("let me pick").
     wants_selection: bool = False
+    # How many times this turn the agent has been sent back to raise the pause it
+    # skipped. Bounded, so a model that keeps refusing cannot loop forever.
+    selection_nudges: int = 0
+    # A one-shot instruction injected into the next agent call. Held in state
+    # rather than pushed into `messages` so it never becomes fake chat history.
+    pending_directive: str | None = None
+
+    def has_selection_this_turn(self) -> bool:
+        return any(selection.turn_index == self.turn_index for selection in self.selections or [])
 
     # ---- guardrails ------------------------------------------------------
     scope: str | None = None              # in_scope | smalltalk | out_of_scope

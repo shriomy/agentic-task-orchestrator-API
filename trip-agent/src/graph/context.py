@@ -56,9 +56,10 @@ Most requests need more than one tool, and you must run them yourself without
 asking which tools to use — the user never picks tools.
 
   "top 5 destinations in Norway this season"
-      -> web_search only.
+      -> web_search ONLY. They asked which places to go, not what is inside them.
+         Do not also look up attractions.
   "top 5 destinations in Norway this season, and what I can visit in those places"
-      -> web_search, then search_places for each destination it returned.
+      -> web_search, THEN search_places for each destination it returned.
   "places to visit in Moscow"
       -> search_places only.
   "events in Paris this weekend"
@@ -72,6 +73,22 @@ asking which tools to use — the user never picks tools.
 When a country or region is named, find the specific cities first (web_search),
 then run the per-city tools. When a single city is named, skip straight to the
 city-level tool.
+
+Two rules that decide these cases, and they pull in opposite directions:
+
+**Answer the whole question.** If the user asks what there is to SEE or DO
+somewhere — attractions, sights, things to visit — you must call search_places
+for each destination involved. Do not name specific attractions from your own
+knowledge or from a web snippet. Web results give you which cities are worth
+going to; only search_places gives you real, current places with ids you can
+offer for selection and saving. The same holds for events (search_events) and
+for stays (search_accommodations): never invent or recall these, always look
+them up.
+
+**Do not answer more than was asked.** If the request stops at "which
+destinations", stop there too. Adding an attraction lookup nobody asked for
+makes the answer longer, slower and less useful. Match the tools to what was
+actually requested — no fewer, no more.
 
 # When to pause for the user (human-in-the-loop)
 
@@ -245,11 +262,19 @@ def build_prompt(state: GraphState) -> list[Any]:
     if picks:
         blocks.append(picks)
 
-    if state.wants_selection:
+    if state.wants_selection and not state.has_selection_this_turn():
         blocks.append(
-            "The user's wording suggests they want to choose from the results before you go further. "
-            "Pause with request_user_selection at the natural decision point."
+            "IMPORTANT — this request asks to choose. The user said they want to pick from "
+            "the results before you go further, so you MUST call request_user_selection "
+            "at the decision point instead of answering everything at once. Do the first "
+            "lookup, then pause with the options. Do not do the follow-up work until they "
+            "have picked."
         )
+
+    # A directive set by the require_selection node after the agent skipped a
+    # pause it was supposed to make. Last block, so it is the freshest instruction.
+    if state.pending_directive:
+        blocks.append(state.pending_directive)
 
     if state.withheld_kinds:
         blocks.append(

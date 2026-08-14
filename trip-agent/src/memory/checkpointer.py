@@ -24,6 +24,27 @@ _pool: Any = None
 _lock = threading.Lock()
 
 
+def build_serializer() -> Any:
+    """Serializer with strict msgpack plus an allowlist for our own state types.
+
+    LangGraph's default is permissive-with-a-warning and is due to start
+    rejecting unregistered types. Naming `Selection` / `SelectionOption`
+    explicitly both silences that and keeps deserialization restricted, which
+    matters because the checkpoint database can reconstruct Python objects.
+    """
+    from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+
+    from ..graph.state import Selection, SelectionOption
+
+    try:
+        return JsonPlusSerializer(
+            allowed_msgpack_modules=(Selection, SelectionOption),
+        ).with_msgpack_allowlist([Selection, SelectionOption])
+    except TypeError:
+        # Older langgraph without the allowlist parameter.
+        return JsonPlusSerializer()
+
+
 def _build_postgres_checkpointer() -> Any | None:
     if not settings.supabase_db_url:
         return None
@@ -49,7 +70,7 @@ def _build_postgres_checkpointer() -> Any | None:
             open=True,
             kwargs={"prepare_threshold": None},  # required behind Supabase's pooler
         )
-        saver = PostgresSaver(_pool)
+        saver = PostgresSaver(_pool, serde=build_serializer())
         saver.setup()  # creates the library-owned checkpoint tables
         logger.info("conversation checkpointer: postgres")
         return saver
@@ -72,7 +93,7 @@ def get_checkpointer() -> Any:
             if _checkpointer is None:
                 from langgraph.checkpoint.memory import InMemorySaver
 
-                _checkpointer = InMemorySaver()
+                _checkpointer = InMemorySaver(serde=build_serializer())
                 logger.info("conversation checkpointer: in-memory")
     return _checkpointer
 

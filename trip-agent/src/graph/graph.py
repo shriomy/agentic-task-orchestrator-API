@@ -10,10 +10,11 @@
    summarize                                    (langmem, only when over budget)
       |
       v
-    agent <-------------.
-      |                 |
-      |  tool_calls?    |
-      +---- tools ------'                       (may interrupt for a pick)
+    agent <-----------------.
+      |                     |
+      |  tool_calls? -------+  tools            (may interrupt for a pick)
+      |                     |
+      |  skipped a pause? --+  require_selection
       |
       v
    finalize                                     (guardrail 2, output half)
@@ -41,6 +42,7 @@ from .nodes import (
     OutOfScopeNode,
     PersistPreferencesNode,
     PreprocessNode,
+    RequireSelectionNode,
     SmalltalkNode,
     SummarizationNode,
     ToolExecutorNode,
@@ -57,22 +59,32 @@ def route_after_preprocess(state: GraphState) -> Literal["out_of_scope", "smallt
     return "summarize"
 
 
-def route_after_agent(state: GraphState) -> Literal["tools", "finalize"]:
-    """Continue the tool loop while the model is still calling tools."""
+def route_after_agent(state: GraphState) -> Literal["tools", "require_selection", "finalize"]:
+    """Continue the tool loop, enforce a skipped pause, or wrap up."""
     messages = state.messages or []
     if not messages:
         return "finalize"
 
     last = messages[-1]
-    if not isinstance(last, AIMessage) or not getattr(last, "tool_calls", None):
-        return "finalize"
+    if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
+        if int(state.tool_round_count or 0) >= settings.max_tool_rounds:
+            # Stop looping. FinalizeNode closes off the dangling tool calls so
+            # the next turn's message history is still valid.
+            return "finalize"
+        return "tools"
 
-    if int(state.tool_round_count or 0) >= settings.max_tool_rounds:
-        # Stop looping. FinalizeNode closes off the dangling tool calls so the
-        # next turn's message history is still valid.
-        return "finalize"
+    # The agent wants to finish. If the user asked to choose and no pause has
+    # happened this turn, send it back — but only after at least one lookup ran,
+    # since there is nothing to offer before that.
+    if (
+        state.wants_selection
+        and not state.has_selection_this_turn()
+        and int(state.tool_round_count or 0) > 0
+        and int(state.selection_nudges or 0) < RequireSelectionNode.MAX_NUDGES
+    ):
+        return "require_selection"
 
-    return "tools"
+    return "finalize"
 
 
 def build_graph(checkpointer: Any | None = None) -> Any:
@@ -84,6 +96,7 @@ def build_graph(checkpointer: Any | None = None) -> Any:
     builder.add_node("summarize", SummarizationNode())
     builder.add_node("agent", AgentNode())
     builder.add_node("tools", ToolExecutorNode())
+    builder.add_node("require_selection", RequireSelectionNode())
     builder.add_node("finalize", FinalizeNode())
     builder.add_node("persist_preferences", PersistPreferencesNode())
 
@@ -99,9 +112,10 @@ def build_graph(checkpointer: Any | None = None) -> Any:
     builder.add_conditional_edges(
         "agent",
         route_after_agent,
-        {"tools": "tools", "finalize": "finalize"},
+        {"tools": "tools", "require_selection": "require_selection", "finalize": "finalize"},
     )
     builder.add_edge("tools", "agent")
+    builder.add_edge("require_selection", "agent")
     builder.add_edge("finalize", "persist_preferences")
     builder.add_edge("persist_preferences", END)
 
