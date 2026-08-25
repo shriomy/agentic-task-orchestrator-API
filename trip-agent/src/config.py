@@ -76,6 +76,14 @@ class Settings(BaseSettings):
     mongodb_db_name: str = "travel_discovery"
     mongodb_favorites_collection: str = "agent_favorites"
 
+    # ---- Tool RAG (Qdrant) -------------------------------------------------
+    # Semantic tool retrieval: only tools relevant to the turn's request are
+    # bound to the model, instead of always sending every tool schema.
+    qdrant_url: str = "http://localhost:6333"
+    qdrant_collection: str = "trip_agent_tools"
+    tool_rag_enabled: bool = True
+    tool_rag_top_k: int = 5
+
     # ---- Tracing ---------------------------------------------------------
     langsmith_api_key: str | None = None
     langsmith_project_name: str = "travel-discovery-agent"

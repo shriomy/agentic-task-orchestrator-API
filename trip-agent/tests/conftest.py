@@ -91,6 +91,16 @@ def fake_collection(monkeypatch: pytest.MonkeyPatch) -> FakeCollection:
     return collection
 
 
+@pytest.fixture(autouse=True)
+def no_tool_rag(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail open by default so tests never depend on a real Qdrant instance.
+
+    Individual tool-retrieval tests exercise src.graph.tool_retrieval directly
+    and are unaffected by this — it only patches the call site nodes.py uses.
+    """
+    monkeypatch.setattr("src.graph.nodes.retrieve_relevant_tools", lambda query, k=None: None)
+
+
 @pytest.fixture
 def no_memory(monkeypatch: pytest.MonkeyPatch) -> None:
     """Disable Supabase reads/writes so nodes run without credentials."""

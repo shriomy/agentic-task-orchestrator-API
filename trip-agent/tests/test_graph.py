@@ -16,6 +16,7 @@ from langgraph.types import Command
 
 from src.graph.graph import build_graph, route_after_agent, route_after_preprocess
 from src.graph.state import GraphState, Selection, SelectionOption, merge_selections
+from src.graph.tools import ALL_TOOLS, SELECTION_TOOL
 from src.guardrails.output import RequestSplit
 from src.guardrails.scope import ScopeVerdict
 
@@ -918,3 +919,53 @@ def test_a_tool_call_with_no_verified_identity_is_refused(harness):
     tool_messages = [m for m in result["messages"] if isinstance(m, ToolMessage)]
     assert tool_messages[0].status == "error"
     assert "your own saved trips" in tool_messages[0].content
+
+
+# --------------------------------------------------------------------------- #
+# Tool RAG — which tools get bound to the model each turn
+# --------------------------------------------------------------------------- #
+
+
+def test_preprocess_populates_active_tools_from_retrieval(harness, monkeypatch):
+    monkeypatch.setattr(
+        "src.graph.nodes.retrieve_relevant_tools",
+        lambda query, k=None: ["search_places"],
+    )
+    graph, model, _ = harness([AIMessage(content="Here you go.")])
+    _patch_agent(graph, model)
+
+    result = graph.invoke(
+        {"thread_id": "t21", "user_id": USER, "message": "places to visit in Kyoto"},
+        config={"configurable": {"thread_id": "t21", **CONFIG_BASE}},
+    )
+    assert set(result["active_tools"]) == {"search_places", SELECTION_TOOL}
+
+
+def test_preprocess_falls_back_to_every_tool_when_retrieval_is_unavailable(harness):
+    """The `no_tool_rag` autouse fixture (conftest.py) already makes retrieval
+    return None by default — this pins down that the fail-open path lands on
+    the full tool set rather than an empty or partial one."""
+    graph, model, _ = harness([AIMessage(content="Here you go.")])
+    _patch_agent(graph, model)
+
+    result = graph.invoke(
+        {"thread_id": "t22", "user_id": USER, "message": "tell me about Norway"},
+        config={"configurable": {"thread_id": "t22", **CONFIG_BASE}},
+    )
+    assert set(result["active_tools"]) == {tool.name for tool in ALL_TOOLS}
+    assert result["bot_response"] == "Here you go."
+
+
+def test_agent_node_binds_only_the_active_tools(harness, monkeypatch):
+    monkeypatch.setattr(
+        "src.graph.nodes.retrieve_relevant_tools",
+        lambda query, k=None: ["search_places", "search_events"],
+    )
+    graph, model, _ = harness([AIMessage(content="Here you go.")])
+    _patch_agent(graph, model)
+
+    graph.invoke(
+        {"thread_id": "t23", "user_id": USER, "message": "places and events in Kyoto"},
+        config={"configurable": {"thread_id": "t23", **CONFIG_BASE}},
+    )
+    assert set(model.bound_tools) == {"search_places", "search_events", SELECTION_TOOL}

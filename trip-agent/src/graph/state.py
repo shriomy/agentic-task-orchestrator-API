@@ -118,6 +118,12 @@ class GraphState(BaseModel):
     # rather than pushed into `messages` so it never becomes fake chat history.
     pending_directive: str | None = None
 
+    # ---- tool retrieval ----------------------------------------------------
+    # Tool names bound to the model this turn, set once by PreprocessNode via
+    # semantic retrieval and reused for every agent<->tools round within the
+    # turn (see graph/tool_retrieval.py). Empty only before preprocessing runs.
+    active_tools: list[str] = Field(default_factory=list)
+
     def has_selection_this_turn(self) -> bool:
         return any(selection.turn_index == self.turn_index for selection in self.selections or [])
 

@@ -41,6 +41,7 @@ from ..memory.user_memory import (
 from ..tools.http import ToolError
 from .context import build_prompt
 from .state import GraphState, Selection, SelectionOption
+from .tool_retrieval import retrieve_relevant_tools
 from .tools import ALL_TOOLS, SELECTION_TOOL, TOOLS_BY_NAME
 
 logger = logging.getLogger(__name__)
@@ -213,6 +214,19 @@ class PreprocessNode:
                 updates["turn_index"],
             )
 
+        # Semantic tool retrieval: bind only what this turn needs. Runs once
+        # per turn (not once per agent<->tools round), so the same tool set
+        # stays available across the whole turn — a multi-step chain like
+        # "find destinations, then places in each" does not risk losing a tool
+        # it already used partway through. request_user_selection is always
+        # added regardless of the retrieval result: RequireSelectionNode
+        # depends on it being callable to enforce a pause the user asked for.
+        retrieved = retrieve_relevant_tools(updates["allowed_request"])
+        if retrieved is None:
+            updates["active_tools"] = [tool.name for tool in ALL_TOOLS]
+        else:
+            updates["active_tools"] = list(dict.fromkeys([*retrieved, SELECTION_TOOL]))
+
         lowered = message.lower()
         updates["wants_selection"] = any(cue in lowered for cue in _SELECTION_CUES)
 
@@ -335,24 +349,32 @@ class SummarizationNode:
 
 
 class AgentNode:
-    """Calls the model with tools bound."""
+    """Calls the model with tools bound.
+
+    Which tools are bound is decided per turn by PreprocessNode's semantic
+    retrieval (state.active_tools), not fixed to the full tool set — so the
+    model here stays raw/unbound and gets `.bind_tools(...)` applied fresh on
+    every call with whatever subset this turn resolved to.
+    """
 
     def __init__(self) -> None:
         self._model: Any = None
 
     @property
     def model(self) -> Any:
-        # Bound lazily so the module imports without LLM credentials present.
+        # Built lazily so the module imports without LLM credentials present.
         if self._model is None:
-            self._model = build_model().bind_tools(ALL_TOOLS)
+            self._model = build_model()
         return self._model
 
     def __call__(self, state: GraphState, config: RunnableConfig = None) -> dict[str, Any]:
         prompt = build_prompt(state)
+        tool_names = state.active_tools or [tool.name for tool in ALL_TOOLS]
+        tools = [TOOLS_BY_NAME[name] for name in tool_names if name in TOOLS_BY_NAME]
         try:
             # A list of messages, not {"messages": [...]} — the old call passed a
             # dict, which a chat model cannot accept.
-            response = self.model.invoke(prompt, config=config)
+            response = self.model.bind_tools(tools).invoke(prompt, config=config)
         except Exception as exc:
             logger.exception("agent model call failed")
             text = "I hit a problem working on that. Could you try again in a moment?"

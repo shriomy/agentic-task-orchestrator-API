@@ -30,6 +30,7 @@ from .auth import AuthError, AuthenticatedUser, verify_access_token
 from .config import settings
 from .db.mongo import status as mongo_status
 from .graph.graph import get_graph
+from .graph.tool_retrieval import ensure_tool_index, tool_index_ready
 from .graph.tools import SELECTION_TOOL
 from .guardrails.authorization import AuthorizationError
 from .memory.checkpointer import close_checkpointer
@@ -51,11 +52,13 @@ logging.basicConfig(level=logging.INFO)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     get_graph()  # compile up front so the first request isn't slow
+    tool_rag_ready = ensure_tool_index()
     logger.info(
-        "trip agent ready | supabase=%s mongo=%s tracing=%s",
+        "trip agent ready | supabase=%s mongo=%s tracing=%s tool_rag=%s",
         supabase_available(),
         bool(settings.mongodb_uri),
         bool(settings.langsmith_api_key and settings.langsmith_tracing),
+        tool_rag_ready,
     )
     yield
     close_checkpointer()
@@ -439,6 +442,10 @@ def favorites_delete(
 # --------------------------------------------------------------------------- #
 
 
+def tool_rag_status() -> dict[str, Any]:
+    return {"enabled": settings.tool_rag_enabled, "index_ready": tool_index_ready()}
+
+
 @app.get("/health")
 def health() -> dict[str, Any]:
     """What's actually wired up. Reports why a dependency is down, not just that
@@ -455,6 +462,7 @@ def health() -> dict[str, Any]:
             "events": bool(settings.ticketmaster_api_key),
             "accommodations": bool(settings.booking_api_key),
         },
+        "tool_rag": tool_rag_status(),
     }
 
 
