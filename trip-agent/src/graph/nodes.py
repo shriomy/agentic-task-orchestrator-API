@@ -43,6 +43,7 @@ from .context import build_prompt
 from .state import GraphState, Selection, SelectionOption
 from .tool_retrieval import retrieve_relevant_tools
 from .tools import ALL_TOOLS, SELECTION_TOOL, TOOLS_BY_NAME
+from .usage import agent_usage_entry, count_tokens, other_usage_entry
 
 logger = logging.getLogger(__name__)
 
@@ -187,25 +188,41 @@ class PreprocessNode:
         if abandoned_selection:
             updates["selections"] = [abandoned_selection]
 
+        usage_entries: list[dict[str, Any]] = []
+
         verdict = classify_scope(message, _recent_context(state))
         updates["scope"] = verdict.label
         updates["scope_reason"] = verdict.reason
+        if verdict.usage:
+            usage_entries.append(
+                other_usage_entry(
+                    "classify_scope", settings.llm_fast_model, verdict.usage["input_tokens"], verdict.usage["output_tokens"]
+                )
+            )
 
         if verdict.label == "out_of_scope":
             # Refuse without adding the user's message to history — an
             # off-topic turn should not pollute the travel context of later
             # turns — but the dangling-tool-call closers above still apply.
             updates["bot_response"] = verdict.refusal
+            updates["usage_log"] = usage_entries
             return updates
 
         if verdict.label == "smalltalk":
             if message:
                 updates["messages"] = [*closers, HumanMessage(content=message)]
+            updates["usage_log"] = usage_entries
             return updates
 
         split = split_request(message)
         updates["withheld_kinds"] = [item.kind for item in split.withheld]
         updates["allowed_request"] = split.allowed_request or message
+        if split.usage:
+            usage_entries.append(
+                other_usage_entry(
+                    "split_request", settings.llm_fast_model, split.usage["input_tokens"], split.usage["output_tokens"]
+                )
+            )
 
         if split.withheld:
             logger.info(
@@ -238,6 +255,7 @@ class PreprocessNode:
         user_id = ((config or {}).get("configurable") or {}).get("auth_user_id") or state.user_id
         summary = get_user_memory_summary(user_id)
         updates["user_memory_summary"] = summary.model_dump()
+        updates["usage_log"] = usage_entries
 
         return updates
 
@@ -261,9 +279,11 @@ class SmalltalkNode:
                 ]
             )
             text = str(getattr(reply, "content", "") or "").strip()
+            usage_metadata = getattr(reply, "usage_metadata", None) or {}
         except Exception as exc:
             logger.warning("smalltalk model unavailable: %s", exc)
             text = ""
+            usage_metadata = {}
 
         if not text:
             text = (
@@ -271,7 +291,19 @@ class SmalltalkNode:
                 "destinations, places to visit, what's on while you're there, and where to "
                 "stay — or pull up a trip you've already saved."
             )
-        return {"bot_response": text, "messages": [AIMessage(content=text)]}
+        usage_log = (
+            [
+                other_usage_entry(
+                    "smalltalk",
+                    settings.llm_fast_model,
+                    usage_metadata.get("input_tokens", 0),
+                    usage_metadata.get("output_tokens", 0),
+                )
+            ]
+            if usage_metadata
+            else []
+        )
+        return {"bot_response": text, "messages": [AIMessage(content=text)], "usage_log": usage_log}
 
 
 class OutOfScopeNode:
@@ -342,9 +374,21 @@ class SummarizationNode:
         # langmem prepends its own SystemMessage carrying the summary; drop it,
         # since the summary now travels in state.running_summary instead.
         kept = [message for message in result.messages if not isinstance(message, SystemMessage)]
+
+        # langmem doesn't expose usage_metadata for its internal model call, so
+        # this is an estimate over the text it summarized and produced.
+        summary_text = getattr(result.running_summary, "summary", "") or ""
+        original_text = "\n".join(str(getattr(m, "content", "") or "") for m in messages)
+        summarize_usage = other_usage_entry(
+            "summarize",
+            settings.llm_fast_model,
+            count_tokens(original_text, settings.llm_fast_model),
+            count_tokens(summary_text, settings.llm_fast_model),
+        )
         return {
             "messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *kept],
             "running_summary": result.running_summary,
+            "usage_log": [summarize_usage],
         }
 
 
@@ -383,7 +427,12 @@ class AgentNode:
         if not isinstance(response, AIMessage):
             response = AIMessage(content=str(getattr(response, "content", response)))
 
-        return {"messages": [response], "last_agent_output": str(response.content or "")}
+        usage_entry = agent_usage_entry(state, tools, settings.llm_model, response)
+        return {
+            "messages": [response],
+            "last_agent_output": str(response.content or ""),
+            "usage_log": [usage_entry],
+        }
 
 
 class ToolExecutorNode:
@@ -623,15 +672,20 @@ class PersistPreferencesNode:
         if len(message) < 12:
             return {"preferences_to_persist": {}}
 
-        extracted = self._extract(message)
+        extracted, usage = self._extract(message)
         for key, value in extracted.items():
             write_user_memory(user_id, key, value)
         if extracted:
             logger.info("persisted user memory keys %s", sorted(extracted))
 
-        return {"preferences_to_persist": {}}
+        updates: dict[str, Any] = {"preferences_to_persist": {}}
+        if usage:
+            updates["usage_log"] = [
+                other_usage_entry("preferences", settings.llm_fast_model, usage["input_tokens"], usage["output_tokens"])
+            ]
+        return updates
 
-    def _extract(self, message: str) -> dict[str, Any]:
+    def _extract(self, message: str) -> tuple[dict[str, Any], dict[str, int] | None]:
         """Pull durable preferences out of the message, if there are any.
 
         Only lasting facts, never one-trip details — "I'm going to Rome in May"
@@ -655,8 +709,8 @@ class PersistPreferencesNode:
             accessibility: str | None = None
 
         try:
-            model = fast_model().with_structured_output(Preferences)
-            result = model.invoke(
+            model = fast_model().with_structured_output(Preferences, include_raw=True)
+            raw_result = model.invoke(
                 [
                     SystemMessage(
                         content=(
@@ -669,12 +723,25 @@ class PersistPreferencesNode:
                     HumanMessage(content=message),
                 ]
             )
+            result = raw_result["parsed"]
+            if result is None:
+                raise ValueError(f"could not parse Preferences: {raw_result.get('parsing_error')}")
+            usage_metadata = getattr(raw_result.get("raw"), "usage_metadata", None) or {}
+            usage = (
+                {
+                    "input_tokens": usage_metadata.get("input_tokens", 0),
+                    "output_tokens": usage_metadata.get("output_tokens", 0),
+                }
+                if usage_metadata
+                else None
+            )
         except Exception as exc:
             logger.debug("preference extraction unavailable: %s", exc)
-            return {}
+            return {}, None
 
-        return {
+        extracted = {
             key: value
             for key, value in result.model_dump().items()
             if value not in (None, "", []) and key in ALLOWED_KEYS
         }
+        return extracted, usage

@@ -59,6 +59,10 @@ class RequestSplit(BaseModel):
         description="The part of the message the assistant should act on, rewritten as a clean instruction. Empty if nothing is actionable.",
     )
     withheld: list[WithheldItem] = Field(default_factory=list)
+    # Not part of the model's own output — filled in by split_request() from
+    # the raw response for token usage tracking (graph/usage.py). Optional so
+    # tests constructing a RequestSplit directly are unaffected.
+    usage: dict[str, int] | None = Field(default=None, exclude=True)
 
 
 SPLIT_RUBRIC = """You pre-process messages for a trip-planning assistant that can also
@@ -114,8 +118,17 @@ def split_request(message: str) -> RequestSplit:
     if not text:
         return RequestSplit(allowed_request="")
     try:
-        model = fast_model().with_structured_output(RequestSplit)
-        split = model.invoke([SystemMessage(content=SPLIT_RUBRIC), HumanMessage(content=text)])
+        model = fast_model().with_structured_output(RequestSplit, include_raw=True)
+        result = model.invoke([SystemMessage(content=SPLIT_RUBRIC), HumanMessage(content=text)])
+        split = result["parsed"]
+        if split is None:
+            raise ValueError(f"could not parse a RequestSplit: {result.get('parsing_error')}")
+        usage_metadata = getattr(result.get("raw"), "usage_metadata", None) or {}
+        if usage_metadata:
+            split.usage = {
+                "input_tokens": usage_metadata.get("input_tokens", 0),
+                "output_tokens": usage_metadata.get("output_tokens", 0),
+            }
     except Exception as exc:  # pragma: no cover - provider/network failure
         logger.warning("output guardrail split unavailable, failing open: %s", exc)
         return RequestSplit(allowed_request=text)

@@ -82,7 +82,7 @@ class Settings(BaseSettings):
     qdrant_url: str = "http://localhost:6333"
     qdrant_collection: str = "trip_agent_tools"
     tool_rag_enabled: bool = True
-    tool_rag_top_k: int = 5
+    tool_rag_top_k: int = 3
 
     # ---- Tracing ---------------------------------------------------------
     langsmith_api_key: str | None = None

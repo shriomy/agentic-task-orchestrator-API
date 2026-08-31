@@ -32,6 +32,7 @@ from .db.mongo import status as mongo_status
 from .graph.graph import get_graph
 from .graph.tool_retrieval import ensure_tool_index, tool_index_ready
 from .graph.tools import SELECTION_TOOL
+from .graph.usage import summarize_turn_usage
 from .guardrails.authorization import AuthorizationError
 from .memory.checkpointer import close_checkpointer
 from .memory.conversations import (
@@ -41,6 +42,7 @@ from .memory.conversations import (
     list_conversations,
     log_selection,
     record_message,
+    record_message_usage,
 )
 from .memory.supabase_client import supabase_available
 from .tools.favorites import delete_favorite, get_favorites, remove_favorite_section
@@ -196,6 +198,8 @@ def run_graph_stream(
     final_text = ""
     interrupt_payload: dict[str, Any] | None = None
     announced: set[str] = set()
+    turn_usage: list[dict[str, Any]] = []
+    turn_index = 0
 
     try:
         for chunk in graph.stream(graph_input, config=config, stream_mode="updates"):
@@ -224,6 +228,11 @@ def run_graph_stream(
                 if node_name in ("finalize", "smalltalk", "out_of_scope"):
                     final_text = str(update.get("bot_response") or final_text)
 
+                if update.get("turn_index"):
+                    turn_index = int(update["turn_index"])
+                if update.get("usage_log"):
+                    turn_usage.extend(update["usage_log"])
+
     except AuthorizationError as exc:
         yield sse({"type": "error", "message": str(exc)})
         yield sse({"type": "done"})
@@ -245,22 +254,48 @@ def run_graph_stream(
             destination=data.get("destination"),
             status="pending",
         )
-        record_message(
+        message_id = record_message(
             thread_id,
             user.user_id,
             "assistant",
             data.get("reason") or "",
             interrupt_data=data,
         )
+        usage_data = _persist_and_report_usage(thread_id, message_id, turn_index, turn_usage)
+        if usage_data:
+            yield sse({"type": "usage", "data": usage_data})
         yield sse(interrupt_payload)
         yield sse({"type": "done"})
         return
 
     if final_text:
-        record_message(thread_id, user.user_id, "assistant", final_text)
+        message_id = record_message(thread_id, user.user_id, "assistant", final_text)
+        usage_data = _persist_and_report_usage(thread_id, message_id, turn_index, turn_usage)
         yield sse({"type": "text", "content": final_text})
+        if usage_data:
+            yield sse({"type": "usage", "data": usage_data})
 
     yield sse({"type": "done"})
+
+
+def _persist_and_report_usage(
+    thread_id: str,
+    message_id: str | None,
+    turn_index: int,
+    turn_usage: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Aggregate one turn's usage_log entries, persist them, and return the
+    shape the SSE `usage` event / frontend expects. Never raises — a logging
+    problem must never fail a user's chat turn."""
+    if not turn_usage:
+        return None
+    try:
+        summary = summarize_turn_usage(turn_usage)
+        record_message_usage(thread_id, message_id, turn_index, summary)
+        return summary
+    except Exception:
+        logger.exception("could not record usage for thread %s", thread_id)
+        return None
 
 
 SSE_HEADERS = {

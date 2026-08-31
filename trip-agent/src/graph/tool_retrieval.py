@@ -184,7 +184,13 @@ def retrieve_relevant_tools(query: str, k: int | None = None) -> list[str] | Non
         return None
 
     names: list[str] = []
+    scores: list[tuple[str, float]] = []
     for point in response.points:
         payload = point.payload or {}
-        names.extend(payload.get("names") or [])
-    return list(dict.fromkeys(names)) or None
+        point_names = payload.get("names") or []
+        names.extend(point_names)
+        scores.append((",".join(point_names), point.score))
+
+    result = list(dict.fromkeys(names)) or None
+    logger.info("tool retrieval for %r -> %s | scores: %s", query, result, scores)
+    return result

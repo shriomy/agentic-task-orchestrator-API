@@ -124,6 +124,14 @@ class GraphState(BaseModel):
     # turn (see graph/tool_retrieval.py). Empty only before preprocessing runs.
     active_tools: list[str] = Field(default_factory=list)
 
+    # ---- usage tracking ------------------------------------------------
+    # Plain replace field, not an accumulator: each node returns only ITS OWN
+    # new entries for that call. main.py's streaming loop (stream_mode=
+    # "updates") sums them across every chunk of one graph.stream() call, so
+    # accumulation is scoped per HTTP request without needing to reset this
+    # across the /chat/resume boundary. See graph/usage.py.
+    usage_log: list[dict[str, Any]] = Field(default_factory=list)
+
     def has_selection_this_turn(self) -> bool:
         return any(selection.turn_index == self.turn_index for selection in self.selections or [])
 

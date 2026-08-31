@@ -30,6 +30,10 @@ class ScopeVerdict(BaseModel):
         default="",
         description="If out_of_scope, a friendly one-or-two sentence reply telling the user what this assistant does cover.",
     )
+    # Not part of the model's own output — filled in by classify_scope() from
+    # the raw response for token usage tracking (graph/usage.py). Optional so
+    # tests constructing a ScopeVerdict directly are unaffected.
+    usage: dict[str, int] | None = Field(default=None, exclude=True)
 
 
 RUBRIC = """You gate requests for a trip-planning assistant. Classify the user's LATEST message.
@@ -89,8 +93,17 @@ def classify_scope(message: str, recent_context: str = "") -> ScopeVerdict:
         prompt = f"Recent conversation (for context only):\n{recent_context}\n\n{prompt}"
 
     try:
-        model = fast_model().with_structured_output(ScopeVerdict)
-        verdict = model.invoke([SystemMessage(content=RUBRIC), HumanMessage(content=prompt)])
+        model = fast_model().with_structured_output(ScopeVerdict, include_raw=True)
+        result = model.invoke([SystemMessage(content=RUBRIC), HumanMessage(content=prompt)])
+        verdict = result["parsed"]
+        if verdict is None:
+            raise ValueError(f"could not parse a ScopeVerdict: {result.get('parsing_error')}")
+        usage_metadata = getattr(result.get("raw"), "usage_metadata", None) or {}
+        if usage_metadata:
+            verdict.usage = {
+                "input_tokens": usage_metadata.get("input_tokens", 0),
+                "output_tokens": usage_metadata.get("output_tokens", 0),
+            }
     except Exception as exc:  # pragma: no cover - provider/network failure
         logger.warning("scope guardrail unavailable, failing open: %s", exc)
         return ScopeVerdict(label="in_scope", reason="Classifier unavailable; failed open.")

@@ -969,3 +969,27 @@ def test_agent_node_binds_only_the_active_tools(harness, monkeypatch):
         config={"configurable": {"thread_id": "t23", **CONFIG_BASE}},
     )
     assert set(model.bound_tools) == {"search_places", "search_events", SELECTION_TOOL}
+
+
+# --------------------------------------------------------------------------- #
+# Token/cost usage tracking
+# --------------------------------------------------------------------------- #
+
+
+def test_agent_call_reports_a_usage_log_entry_with_the_expected_shape(harness):
+    """The ScriptedModel's replies carry no usage_metadata, so this exercises
+    the tiktoken-estimate fallback path end to end."""
+    graph, model, _ = harness([AIMessage(content="Here you go.")])
+    _patch_agent(graph, model)
+
+    result = graph.invoke(
+        {"thread_id": "t24", "user_id": USER, "message": "tell me about Norway"},
+        config={"configurable": {"thread_id": "t24", **CONFIG_BASE}},
+    )
+    # Only the last node's update survives in the final state snapshot for a
+    # plain-replace field, so this checks the shape rather than exact counts.
+    assert "usage_log" in result
+    entry = next(e for e in result["usage_log"] if e["node"] == "agent")
+    assert set(entry) >= {"system_prompt", "memory", "context", "tools", "other", "input_tokens", "output_tokens"}
+    assert entry["system_prompt"] > 0
+    assert entry["input_tokens"] > 0

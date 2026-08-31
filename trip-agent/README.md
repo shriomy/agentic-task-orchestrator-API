@@ -213,8 +213,9 @@ and accommodations below those.
 
 ## Supabase tables
 
-Every application table is prefixed `agent_`. Migration:
-[migrations/001_agent_tables.sql](migrations/001_agent_tables.sql).
+Every application table is prefixed `agent_`. Migrations:
+[migrations/001_agent_tables.sql](migrations/001_agent_tables.sql),
+[migrations/002_agent_message_usage.sql](migrations/002_agent_message_usage.sql).
 
 | Table | Purpose |
 |---|---|
@@ -222,8 +223,9 @@ Every application table is prefixed `agent_`. Migration:
 | `agent_messages` | Transcript, with `interrupt_data` for a pending pick and `tool_calls` per turn |
 | `agent_user_memory` | Cross-thread durable preferences, `(user_id, key)` |
 | `agent_selection_log` | Audit trail of every interrupt and its outcome |
+| `agent_message_usage` | Per-message token/cost breakdown (context/memory/system prompt/tools/other), linked to `agent_messages` |
 
-RLS is on for all four, scoped to `auth.uid()`.
+RLS is on for all five, scoped to `auth.uid()`.
 
 > The LangGraph checkpointer creates its own tables (`checkpoints`,
 > `checkpoint_blobs`, `checkpoint_writes`, `checkpoint_migrations`). Those names
