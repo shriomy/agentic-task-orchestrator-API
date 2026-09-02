@@ -7,6 +7,9 @@
       |      \
       |       `-- smalltalk --------> END
       v
+  tool_search ---- (no tool needed) -> END      (direct answer, skips agent)
+      |
+      v
    summarize                                    (langmem, only when over budget)
       |
       v
@@ -46,17 +49,26 @@ from .nodes import (
     SmalltalkNode,
     SummarizationNode,
     ToolExecutorNode,
+    ToolSearchNode,
 )
 from .state import GraphState
 
 
-def route_after_preprocess(state: GraphState) -> Literal["out_of_scope", "smalltalk", "summarize"]:
+def route_after_preprocess(state: GraphState) -> Literal["out_of_scope", "smalltalk", "tool_search"]:
     """Guardrail 1's decision, applied."""
     if state.scope == "out_of_scope":
         return "out_of_scope"
     if state.scope == "smalltalk":
         return "smalltalk"
-    return "summarize"
+    return "tool_search"
+
+
+def route_after_tool_search(state: GraphState) -> Literal["summarize", "end"]:
+    """Whether ToolSearchNode answered directly (no tool needed) or found a
+    query worth searching with. Decided after the node runs, since — unlike
+    out_of_scope/smalltalk, which are known before their node runs — this
+    depends on whether the model's single tool call fired."""
+    return "end" if state.bot_response is not None else "summarize"
 
 
 def route_after_agent(state: GraphState) -> Literal["tools", "require_selection", "finalize"]:
@@ -93,6 +105,7 @@ def build_graph(checkpointer: Any | None = None) -> Any:
     builder.add_node("preprocess", PreprocessNode())
     builder.add_node("out_of_scope", OutOfScopeNode())
     builder.add_node("smalltalk", SmalltalkNode())
+    builder.add_node("tool_search", ToolSearchNode())
     builder.add_node("summarize", SummarizationNode())
     builder.add_node("agent", AgentNode())
     builder.add_node("tools", ToolExecutorNode())
@@ -104,10 +117,15 @@ def build_graph(checkpointer: Any | None = None) -> Any:
     builder.add_conditional_edges(
         "preprocess",
         route_after_preprocess,
-        {"out_of_scope": "out_of_scope", "smalltalk": "smalltalk", "summarize": "summarize"},
+        {"out_of_scope": "out_of_scope", "smalltalk": "smalltalk", "tool_search": "tool_search"},
     )
     builder.add_edge("out_of_scope", END)
     builder.add_edge("smalltalk", END)
+    builder.add_conditional_edges(
+        "tool_search",
+        route_after_tool_search,
+        {"summarize": "summarize", "end": END},
+    )
     builder.add_edge("summarize", "agent")
     builder.add_conditional_edges(
         "agent",

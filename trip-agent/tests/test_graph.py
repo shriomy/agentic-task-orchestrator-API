@@ -14,13 +14,13 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
-from src.graph.graph import build_graph, route_after_agent, route_after_preprocess
+from src.graph.graph import build_graph, route_after_agent, route_after_preprocess, route_after_tool_search
 from src.graph.state import GraphState, Selection, SelectionOption, merge_selections
 from src.graph.tools import ALL_TOOLS, SELECTION_TOOL
 from src.guardrails.output import RequestSplit
 from src.guardrails.scope import ScopeVerdict
 
-from helpers import ScriptedModel
+from helpers import AlwaysSearchModel, ScriptedModel
 
 USER = "user-1"
 CONFIG_BASE = {"auth_user_id": USER}
@@ -74,6 +74,11 @@ def harness(monkeypatch, no_memory):
         "src.graph.nodes.split_request",
         lambda message: RequestSplit(allowed_request=message, withheld=[]),
     )
+    # ToolSearchNode's own model call: default to always searching with the
+    # request as-is, matching the old unconditional-retrieval behavior, so
+    # tests that aren't about the search-vs-answer gate itself still reach
+    # AgentNode as before. Tests targeting the gate override this directly.
+    monkeypatch.setattr("src.graph.nodes.fast_model", lambda: AlwaysSearchModel())
 
     def make(script: list) -> tuple:
         graph = build_graph(checkpointer=InMemorySaver())
@@ -111,7 +116,15 @@ def _patch_agent(graph, model):
 def test_scope_router_sends_each_verdict_to_its_own_branch():
     assert route_after_preprocess(GraphState(scope="out_of_scope")) == "out_of_scope"
     assert route_after_preprocess(GraphState(scope="smalltalk")) == "smalltalk"
-    assert route_after_preprocess(GraphState(scope="in_scope")) == "summarize"
+    assert route_after_preprocess(GraphState(scope="in_scope")) == "tool_search"
+
+
+def test_tool_search_router_ends_the_turn_when_it_answered_directly():
+    assert route_after_tool_search(GraphState(bot_response="Answered directly.")) == "end"
+
+
+def test_tool_search_router_continues_when_no_direct_answer_was_set():
+    assert route_after_tool_search(GraphState(bot_response=None)) == "summarize"
 
 
 def test_agent_router_loops_only_while_tools_are_requested():
@@ -969,6 +982,81 @@ def test_agent_node_binds_only_the_active_tools(harness, monkeypatch):
         config={"configurable": {"thread_id": "t23", **CONFIG_BASE}},
     )
     assert set(model.bound_tools) == {"search_places", "search_events", SELECTION_TOOL}
+
+
+def test_tool_search_answers_directly_and_skips_agent_when_no_tool_is_needed(harness, monkeypatch):
+    monkeypatch.setattr(
+        "src.graph.nodes.fast_model",
+        lambda: ScriptedModel([AIMessage(content="Spring and early autumn are best.")]),
+    )
+    graph, model, _ = harness([AIMessage(content="Should never be reached.")])
+    _patch_agent(graph, model)
+
+    result = graph.invoke(
+        {"thread_id": "t25", "user_id": USER, "message": "what's the best time to visit Portugal?"},
+        config={"configurable": {"thread_id": "t25", **CONFIG_BASE}},
+    )
+    assert result["bot_response"] == "Spring and early autumn are best."
+    assert model.calls == []  # AgentNode's scripted model was never invoked
+
+
+def test_tool_search_defers_to_full_pipeline_when_a_selection_is_wanted(harness, monkeypatch):
+    """A direct answer must never bypass HIL: if the message carries a
+    selection cue, ToolSearchNode has to fail open to the full pipeline even
+    though its own model chose not to call search_tools."""
+    monkeypatch.setattr(
+        "src.graph.nodes.fast_model",
+        lambda: ScriptedModel([AIMessage(content="I would just answer directly.")]),
+    )
+    graph, model, _ = harness([AIMessage(content="Here you go.")])
+    _patch_agent(graph, model)
+
+    result = graph.invoke(
+        {
+            "thread_id": "t26",
+            "user_id": USER,
+            "message": "let me pick from a few options for places in Lisbon",
+        },
+        config={"configurable": {"thread_id": "t26", **CONFIG_BASE}},
+    )
+    assert set(result["active_tools"]) == {tool.name for tool in ALL_TOOLS}
+    assert result["bot_response"] == "Here you go."
+
+
+def test_tool_search_fails_open_to_all_tools_when_the_model_call_errors(harness, monkeypatch):
+    def boom():
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr("src.graph.nodes.fast_model", boom)
+    graph, model, _ = harness([AIMessage(content="Here you go.")])
+    _patch_agent(graph, model)
+
+    result = graph.invoke(
+        {"thread_id": "t27", "user_id": USER, "message": "tell me about Norway"},
+        config={"configurable": {"thread_id": "t27", **CONFIG_BASE}},
+    )
+    assert set(result["active_tools"]) == {tool.name for tool in ALL_TOOLS}
+    assert result["bot_response"] == "Here you go."
+
+
+def test_tool_search_skips_the_model_call_when_rag_is_disabled(monkeypatch):
+    """Unit-level, not through the full graph: fast_model() is shared
+    infrastructure (SummarizationNode, PersistPreferencesNode use it too), so
+    routing a whole turn through graph.invoke() would catch their calls as
+    false positives. ToolSearchNode's own gate is what's under test here."""
+    from src.graph.nodes import ToolSearchNode
+
+    monkeypatch.setattr("src.graph.nodes.settings.tool_rag_enabled", False)
+    called: list[bool] = []
+    monkeypatch.setattr("src.graph.nodes.fast_model", lambda: called.append(True) or ScriptedModel([]))
+
+    node = ToolSearchNode()
+    result = node(
+        GraphState(thread_id="t28", user_id=USER, message="tell me about Norway", allowed_request="tell me about Norway")
+    )
+
+    assert called == []
+    assert set(result["active_tools"]) == {tool.name for tool in ALL_TOOLS}
 
 
 # --------------------------------------------------------------------------- #

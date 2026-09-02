@@ -2,12 +2,15 @@
 
 Turn shape:
 
-    preprocess -> summarize -> agent -> [tools -> agent]* -> finalize -> persist
+    preprocess -> tool_search -> summarize -> agent -> [tools -> agent]* -> finalize -> persist
 
 `preprocess` runs guardrail 1 (scope) and the request-splitting half of
 guardrail 2, loads cross-thread memory, and detects whether the user wants to
-pick. `finalize` runs the redaction half of guardrail 2. Guardrail 3 is enforced
-inside the tools themselves, since that is the only place a query is issued.
+pick. `tool_search` decides, via one real tool call, whether this turn needs
+any domain tool at all — and if so, which ones — before `agent` ever runs; a
+confidently toolless turn short-circuits straight to a direct answer. `finalize`
+runs the redaction half of guardrail 2. Guardrail 3 is enforced inside the
+tools themselves, since that is the only place a query is issued.
 """
 
 from __future__ import annotations
@@ -41,7 +44,7 @@ from ..memory.user_memory import (
 from ..tools.http import ToolError
 from .context import build_prompt
 from .state import GraphState, Selection, SelectionOption
-from .tool_retrieval import retrieve_relevant_tools
+from .tool_retrieval import retrieve_relevant_tools, search_tools
 from .tools import ALL_TOOLS, SELECTION_TOOL, TOOLS_BY_NAME
 from .usage import agent_usage_entry, count_tokens, other_usage_entry
 
@@ -231,19 +234,6 @@ class PreprocessNode:
                 updates["turn_index"],
             )
 
-        # Semantic tool retrieval: bind only what this turn needs. Runs once
-        # per turn (not once per agent<->tools round), so the same tool set
-        # stays available across the whole turn — a multi-step chain like
-        # "find destinations, then places in each" does not risk losing a tool
-        # it already used partway through. request_user_selection is always
-        # added regardless of the retrieval result: RequireSelectionNode
-        # depends on it being callable to enforce a pause the user asked for.
-        retrieved = retrieve_relevant_tools(updates["allowed_request"])
-        if retrieved is None:
-            updates["active_tools"] = [tool.name for tool in ALL_TOOLS]
-        else:
-            updates["active_tools"] = list(dict.fromkeys([*retrieved, SELECTION_TOOL]))
-
         lowered = message.lower()
         updates["wants_selection"] = any(cue in lowered for cue in _SELECTION_CUES)
 
@@ -258,6 +248,94 @@ class PreprocessNode:
         updates["usage_log"] = usage_entries
 
         return updates
+
+
+_TOOL_SEARCH_SYSTEM_PROMPT = (
+    "You decide whether answering the user's travel request needs a real lookup "
+    "(destinations, places, events, accommodations, or the user's saved trips) or "
+    "an action (saving, updating, removing a saved trip). If it does, call "
+    "search_tools with a clear, self-contained description of the capability "
+    "needed — expand short or ambiguous phrasing using the conversation so far. "
+    "If the request is answerable from general knowledge or conversation alone, "
+    "with no lookup or action needed, just answer it directly instead of calling "
+    "search_tools."
+)
+
+
+class ToolSearchNode:
+    """Gate: one real tool call decides whether this turn needs any domain
+    tool before AgentNode runs, and if so, with a model-rewritten query.
+
+    Replaces the old always-top-k retrieval that ran unconditionally in
+    PreprocessNode: that approach had no relevance floor, so even a fully
+    toolless in-scope request ("what's the best time to visit Portugal?")
+    still got 3 tool schemas forced onto AgentNode every turn. Putting a real
+    tool call here means the model itself decides whether to search at all —
+    same mechanism as Anthropic's tool_search_tool — and a confidently
+    toolless turn can skip AgentNode's full system prompt and bind_tools call
+    entirely instead of merely binding fewer tools.
+
+    Never short-circuits a turn where `wants_selection` is true: that flag
+    drives RequireSelectionNode's HIL pause downstream of `agent`, and this
+    node's narrow single-tool judgment must never be trusted over that gate.
+    """
+
+    def __call__(self, state: GraphState, config: RunnableConfig = None) -> dict[str, Any]:
+        if not settings.tool_rag_enabled:
+            return {"active_tools": [tool.name for tool in ALL_TOOLS]}
+
+        query_text = (state.allowed_request or state.message or "").strip()
+        if not query_text:
+            return {"active_tools": [tool.name for tool in ALL_TOOLS]}
+
+        try:
+            response = fast_model().bind_tools([search_tools]).invoke(
+                [
+                    SystemMessage(content=_TOOL_SEARCH_SYSTEM_PROMPT),
+                    HumanMessage(
+                        content=f"{_recent_context(state)}\n\ncurrent request: {query_text}".strip()
+                    ),
+                ],
+                config=config,
+            )
+        except Exception as exc:
+            logger.warning("tool_search model unavailable, binding all tools: %s", exc)
+            return {"active_tools": [tool.name for tool in ALL_TOOLS]}
+
+        usage_metadata = getattr(response, "usage_metadata", None) or {}
+        usage_log = (
+            [
+                other_usage_entry(
+                    "tool_search",
+                    settings.llm_fast_model,
+                    usage_metadata.get("input_tokens", 0),
+                    usage_metadata.get("output_tokens", 0),
+                )
+            ]
+            if usage_metadata
+            else []
+        )
+
+        tool_calls = list(getattr(response, "tool_calls", None) or [])
+        if tool_calls:
+            search_query = str(tool_calls[0].get("args", {}).get("query") or query_text)
+            retrieved = retrieve_relevant_tools(search_query)
+            active = list(dict.fromkeys([*(retrieved or [tool.name for tool in ALL_TOOLS]), SELECTION_TOOL]))
+            return {"active_tools": active, "usage_log": usage_log}
+
+        # No tool call: the model judged this answerable without a lookup.
+        if state.wants_selection:
+            # Never trust this over HIL — fail open to the full pipeline so
+            # RequireSelectionNode still gets its normal chance to pause.
+            return {"active_tools": [tool.name for tool in ALL_TOOLS], "usage_log": usage_log}
+
+        text = str(response.content or "")
+        return {
+            "bot_response": text,
+            "messages": [AIMessage(content=text)],
+            "active_tools": [SELECTION_TOOL],
+            "usage_log": usage_log,
+        }
 
 
 class SmalltalkNode:
@@ -395,7 +473,7 @@ class SummarizationNode:
 class AgentNode:
     """Calls the model with tools bound.
 
-    Which tools are bound is decided per turn by PreprocessNode's semantic
+    Which tools are bound is decided per turn by ToolSearchNode's semantic
     retrieval (state.active_tools), not fixed to the full tool set — so the
     model here stays raw/unbound and gets `.bind_tools(...)` applied fresh on
     every call with whatever subset this turn resolved to.

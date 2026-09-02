@@ -33,10 +33,30 @@ import uuid
 from functools import lru_cache
 from typing import Any
 
+from langchain_core.tools import tool
+
 from ..config import settings
 from .tools import FAVORITE_TOOLS, SELECTION_TOOL, TOOLS_BY_NAME
 
 logger = logging.getLogger(__name__)
+
+
+@tool
+def search_tools(query: str) -> str:
+    """Search the travel agent's available capabilities (destination/place/event/
+    accommodation lookups, saved-trip favorites) for the ones relevant to this
+    request. Call this before answering if fulfilling the request needs a real
+    lookup, search, save, or modification. Skip it and answer directly if the
+    request is general knowledge/conversation that needs no lookup.
+
+    `query`: a clear, self-contained description of the capability needed —
+    expand short or ambiguous phrasing using the conversation so far (e.g.
+    "what event?" -> "what events are happening soon in the destination discussed").
+    """
+    # Never actually executed: ToolSearchNode (graph/nodes.py) intercepts the
+    # tool_call and resolves it via retrieve_relevant_tools() directly. This
+    # body exists only so a stray direct invocation fails loudly.
+    raise NotImplementedError("search_tools is resolved by ToolSearchNode, never executed directly")
 
 _FAVORITES_UNIT_ID = "favorites_group"
 
