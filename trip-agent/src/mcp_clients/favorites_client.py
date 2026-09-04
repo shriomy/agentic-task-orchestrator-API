@@ -36,7 +36,7 @@ from typing import Any
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import interrupt
 from mcp import ClientSession, types
-from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.streamable_http import streamable_http_client
 
 from ..config import settings
 from ..tools.http import ToolError
@@ -62,7 +62,7 @@ async def _call_tool_async(
     elicitation_callback: Any,
 ) -> dict[str, Any]:
     try:
-        async with streamablehttp_client(
+        async with streamable_http_client(
             settings.favorites_mcp_url,
             headers={"Authorization": f"Bearer {token}"},
         ) as (read, write, _):
@@ -181,7 +181,6 @@ def _resolve_with_confirmation(
 
     probe_result = asyncio.run(_call_tool_async(tool_name, args, token, probing_callback))
     if "message" not in captured:
-        # The server didn't need to ask at all (e.g. nothing found) — done.
         return probe_result
 
     reply = interrupt(
