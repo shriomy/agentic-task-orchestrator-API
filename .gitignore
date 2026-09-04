@@ -8,3 +8,5 @@ build/
 *.pyc
 trip-agent/.env
 trip-agent/.env.example
+# Holds a live bearer token for the local favorites-mcp-server connection.
+.mcp.json
