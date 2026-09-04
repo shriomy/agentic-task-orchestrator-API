@@ -1,0 +1,143 @@
+D:\ICIEOS\agentic-task-orchestrator-API\favorites-mcp-server\.venv\Lib\site-packages\fastmcp\server\auth\providers\jwt.py:10: AuthlibDeprecationWarning: authlib.jose module is deprecated, please use joserfc instead.
+It will be compatible before version 2.0.0.
+  from authlib.jose import JsonWebKey, JsonWebToken
+D:\ICIEOS\agentic-task-orchestrator-API\favorites-mcp-server\.venv\Lib\site-packages\authlib\integrations\httpx_client\assertion_client.py:5: AuthlibDeprecationWarning: The httpx module is deprecated; please use httpx2 instead.
+  from ._compat import httpx2
+INFO:__main__:favorites-mcp-server starting on port 8001
+
+
++-----------------------------------------------------------------------------+
+|                                                                             |
+|                                                                             |
+|                        \u2584\u2580\u2580 \u2584\u2580\u2588 \u2588\u2580\u2580 \u2580\u2588\u2580 \u2588\u2580\u2584\u2580\u2588 \u2588\u2580\u2580 \u2588\u2580\u2588                        |
+|                        \u2588\u2580  \u2588\u2580\u2588 \u2584\u2584\u2588  \u2588  \u2588 \u2580 \u2588 \u2588\u2584\u2584 \u2588\u2580\u2580                        |
+|                                                                             |
+|                                                                             |
+|                                                                             |
+|                               FastMCP 2.14.7                                |
+|                            https://gofastmcp.com                            |
+|                                                                             |
+|                    \U0001f5a5  Server:      favorites                                |
+|                    \U0001f680 Deploy free: https://fastmcp.cloud                    |
+|                                                                             |
++-----------------------------------------------------------------------------+
++-----------------------------------------------------------------------------+
+|                          \u2728 FastMCP 3.0 is coming!                          |
+|      Pin `fastmcp < 3` in production, then upgrade when you're ready.       |
++-----------------------------------------------------------------------------+
++-----------------------------------------------------------------------------+
+|                         \U0001f389 Update available: 4.0.2                          |
+|                     Run: pip install --upgrade fastmcp                      |
++-----------------------------------------------------------------------------+
+
+
+[09/04/26 08:19:40] INFO     Starting MCP server 'favorites'     server.py:2580
+                             with transport 'streamable-http' on               
+                             http://0.0.0.0:8001/mcp                           
+INFO:     Started server process [3252]
+INFO:     Waiting for application startup.
+INFO:docket.worker:Starting worker 'DESKTOP-LF45762#3252' with the following tasks:
+INFO:docket.worker:* trace(message: str, ...)
+INFO:docket.worker:* fail(message: str, ...)
+INFO:docket.worker:* sleep(seconds: float, ...)
+INFO:mcp.server.streamable_http_manager:StreamableHTTP session manager started
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8001 (Press CTRL+C to quit)
+INFO:     127.0.0.1:56964 - "GET /mcp HTTP/1.1" 401 Unauthorized
+[09/04/26 08:19:44] INFO     Auth error returned:              middleware.py:92
+                             invalid_token (status=401)                        
+INFO:mcp.server.streamable_http_manager:Created new transport with session ID: 8bbf3d9d152d4be290de5c2073b0066a
+INFO:     127.0.0.1:54757 - "POST /mcp HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60178 - "GET /mcp HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60177 - "POST /mcp HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:60180 - "POST /mcp HTTP/1.1" 200 OK
+INFO:mcp.server.lowlevel.server:Processing request of type CallToolRequest
+INFO:     127.0.0.1:60189 - "POST /mcp HTTP/1.1" 200 OK
+INFO:mcp.server.lowlevel.server:Processing request of type ListToolsRequest
+INFO:mcp.server.streamable_http:Terminating session: 8bbf3d9d152d4be290de5c2073b0066a
+INFO:     127.0.0.1:60191 - "DELETE /mcp HTTP/1.1" 200 OK
+INFO:mcp.server.streamable_http_manager:Created new transport with session ID: 396c5df82312455aa84cf5460ed17526
+INFO:     127.0.0.1:60194 - "POST /mcp HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60198 - "GET /mcp HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60197 - "POST /mcp HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:60200 - "POST /mcp HTTP/1.1" 200 OK
+INFO:mcp.server.lowlevel.server:Processing request of type CallToolRequest
+INFO:     127.0.0.1:60202 - "POST /mcp HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:60204 - "POST /mcp HTTP/1.1" 200 OK
+INFO:mcp.server.lowlevel.server:Processing request of type ListToolsRequest
+INFO:mcp.server.streamable_http:Terminating session: 396c5df82312455aa84cf5460ed17526
+INFO:     127.0.0.1:60206 - "DELETE /mcp HTTP/1.1" 200 OK
+INFO:mcp.server.streamable_http_manager:Created new transport with session ID: 9b71fc56c1c246438dd0f76a093d01d7
+INFO:     127.0.0.1:60208 - "POST /mcp HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60212 - "GET /mcp HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60211 - "POST /mcp HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:60214 - "POST /mcp HTTP/1.1" 200 OK
+INFO:mcp.server.lowlevel.server:Processing request of type CallToolRequest
+INFO:     127.0.0.1:60216 - "POST /mcp HTTP/1.1" 200 OK
+INFO:mcp.server.lowlevel.server:Processing request of type ListToolsRequest
+INFO:mcp.server.streamable_http:Terminating session: 9b71fc56c1c246438dd0f76a093d01d7
+INFO:     127.0.0.1:60218 - "DELETE /mcp HTTP/1.1" 200 OK
+INFO:mcp.server.streamable_http_manager:Created new transport with session ID: c2faa7b4a7b645d3822f09581901f135
+INFO:     127.0.0.1:60220 - "POST /mcp HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60224 - "GET /mcp HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60223 - "POST /mcp HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:60226 - "POST /mcp HTTP/1.1" 200 OK
+INFO:mcp.server.lowlevel.server:Processing request of type CallToolRequest
+INFO:     127.0.0.1:60228 - "POST /mcp HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:60230 - "POST /mcp HTTP/1.1" 200 OK
+INFO:mcp.server.lowlevel.server:Processing request of type ListToolsRequest
+INFO:mcp.server.streamable_http:Terminating session: c2faa7b4a7b645d3822f09581901f135
+INFO:     127.0.0.1:60233 - "DELETE /mcp HTTP/1.1" 200 OK
+INFO:mcp.server.streamable_http_manager:Created new transport with session ID: e5d20af4720c49b6a1d6f44f254ef523
+INFO:     127.0.0.1:60235 - "POST /mcp HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60238 - "GET /mcp HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60239 - "POST /mcp HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:60241 - "POST /mcp HTTP/1.1" 200 OK
+INFO:mcp.server.lowlevel.server:Processing request of type CallToolRequest
+INFO:     127.0.0.1:60243 - "POST /mcp HTTP/1.1" 200 OK
+INFO:mcp.server.lowlevel.server:Processing request of type ListToolsRequest
+INFO:mcp.server.streamable_http:Terminating session: e5d20af4720c49b6a1d6f44f254ef523
+INFO:     127.0.0.1:60245 - "DELETE /mcp HTTP/1.1" 200 OK
+INFO:mcp.server.streamable_http_manager:Created new transport with session ID: 70c525b60c4740828e87da9d3ffe7be4
+INFO:     127.0.0.1:55375 - "POST /mcp HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55379 - "GET /mcp HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55378 - "POST /mcp HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:55381 - "POST /mcp HTTP/1.1" 200 OK
+INFO:mcp.server.lowlevel.server:Processing request of type CallToolRequest
+INFO:     127.0.0.1:55383 - "POST /mcp HTTP/1.1" 200 OK
+INFO:mcp.server.lowlevel.server:Processing request of type ListToolsRequest
+INFO:mcp.server.streamable_http:Terminating session: 70c525b60c4740828e87da9d3ffe7be4
+INFO:     127.0.0.1:55386 - "DELETE /mcp HTTP/1.1" 200 OK
+INFO:mcp.server.streamable_http_manager:Created new transport with session ID: e5aa0d1700eb4d8f8dfa605ee3d5d101
+INFO:     127.0.0.1:55394 - "POST /mcp HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55398 - "GET /mcp HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55397 - "POST /mcp HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:55400 - "POST /mcp HTTP/1.1" 200 OK
+INFO:mcp.server.lowlevel.server:Processing request of type CallToolRequest
+INFO:     127.0.0.1:55403 - "POST /mcp HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:55405 - "POST /mcp HTTP/1.1" 200 OK
+INFO:mcp.server.lowlevel.server:Processing request of type ListToolsRequest
+INFO:mcp.server.streamable_http:Terminating session: e5aa0d1700eb4d8f8dfa605ee3d5d101
+INFO:     127.0.0.1:53248 - "DELETE /mcp HTTP/1.1" 200 OK
+INFO:mcp.server.streamable_http_manager:Created new transport with session ID: 15e9a7689eb045c889cf42a2ae087e32
+INFO:     127.0.0.1:54858 - "POST /mcp HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54862 - "GET /mcp HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54861 - "POST /mcp HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:54864 - "POST /mcp HTTP/1.1" 200 OK
+INFO:mcp.server.lowlevel.server:Processing request of type CallToolRequest
+INFO:     127.0.0.1:54866 - "POST /mcp HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:54868 - "POST /mcp HTTP/1.1" 200 OK
+INFO:mcp.server.lowlevel.server:Processing request of type ListToolsRequest
+INFO:mcp.server.streamable_http:Terminating session: 15e9a7689eb045c889cf42a2ae087e32
+INFO:     127.0.0.1:54870 - "DELETE /mcp HTTP/1.1" 200 OK
+INFO:mcp.server.streamable_http_manager:Created new transport with session ID: 4e44704cb4e64d8c92ca7ec3b20c1b47
+INFO:     127.0.0.1:54874 - "POST /mcp HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54878 - "GET /mcp HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54877 - "POST /mcp HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:54880 - "POST /mcp HTTP/1.1" 200 OK
+INFO:mcp.server.lowlevel.server:Processing request of type CallToolRequest
+INFO:     127.0.0.1:54882 - "POST /mcp HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:54884 - "POST /mcp HTTP/1.1" 200 OK
+INFO:mcp.server.lowlevel.server:Processing request of type ListToolsRequest
+INFO:mcp.server.streamable_http:Terminating session: 4e44704cb4e64d8c92ca7ec3b20c1b47
+INFO:     127.0.0.1:54886 - "DELETE /mcp HTTP/1.1" 200 OK

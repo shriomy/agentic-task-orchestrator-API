@@ -189,6 +189,9 @@ def run_graph_stream(
             # The one trusted identity. Tools read it from here.
             "auth_user_id": user.user_id,
             "user_email": user.email,
+            # Forwarded as-is to favorites-mcp-server, which verifies it
+            # independently rather than trusting a derived user_id argument.
+            "auth_token": user.token,
         },
         "recursion_limit": settings.max_tool_rounds * 3 + 10,
         "metadata": {"user_id": user.user_id, "thread_id": thread_id},
@@ -225,7 +228,7 @@ def run_graph_stream(
                                 announced.add(label)
                                 yield sse({"type": "tool", "content": label})
 
-                if node_name in ("finalize", "smalltalk", "out_of_scope"):
+                if node_name in ("finalize", "smalltalk", "out_of_scope", "tool_search"):
                     final_text = str(update.get("bot_response") or final_text)
 
                 if update.get("turn_index"):
@@ -356,7 +359,13 @@ def chat_resume(
     assert_body_user_matches(user, request.user_id)
 
     graph = get_graph()
-    config = {"configurable": {"thread_id": request.thread_id, "auth_user_id": user.user_id}}
+    config = {
+        "configurable": {
+            "thread_id": request.thread_id,
+            "auth_user_id": user.user_id,
+            "auth_token": user.token,
+        }
+    }
 
     # Authorization: only resume a thread this user owns, and only one that is
     # genuinely waiting. Without this check a guessed thread_id could be driven.

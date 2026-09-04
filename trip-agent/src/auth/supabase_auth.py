@@ -39,6 +39,10 @@ class AuthenticatedUser:
     user_id: str
     email: str | None = None
     role: str = "authenticated"
+    # The raw, already-verified bearer token — forwarded as-is to services
+    # (e.g. favorites-mcp-server) that need to independently verify identity
+    # themselves rather than trusting a derived user_id passed as an argument.
+    token: str = ""
 
 
 _jwks_client: PyJWKClient | None = None
@@ -63,7 +67,7 @@ def _get_jwks_client() -> PyJWKClient | None:
     return _jwks_client
 
 
-def _user_from_claims(claims: dict[str, Any]) -> AuthenticatedUser:
+def _user_from_claims(claims: dict[str, Any], token: str = "") -> AuthenticatedUser:
     user_id = claims.get("sub")
     if not user_id:
         raise AuthError("Token has no subject claim.")
@@ -71,6 +75,7 @@ def _user_from_claims(claims: dict[str, Any]) -> AuthenticatedUser:
         user_id=str(user_id),
         email=claims.get("email"),
         role=str(claims.get("role") or "authenticated"),
+        token=token,
     )
 
 
@@ -87,7 +92,7 @@ def _verify_asymmetric(token: str) -> AuthenticatedUser | None:
             audience=settings.supabase_jwt_audience,
             options={"verify_aud": bool(settings.supabase_jwt_audience)},
         )
-        return _user_from_claims(claims)
+        return _user_from_claims(claims, token)
     except jwt.ExpiredSignatureError as exc:
         raise AuthError("Session expired; please sign in again.") from exc
     except jwt.InvalidTokenError:
@@ -111,7 +116,7 @@ def _verify_symmetric(token: str) -> AuthenticatedUser | None:
             audience=settings.supabase_jwt_audience,
             options={"verify_aud": bool(settings.supabase_jwt_audience)},
         )
-        return _user_from_claims(claims)
+        return _user_from_claims(claims, token)
     except jwt.ExpiredSignatureError as exc:
         raise AuthError("Session expired; please sign in again.") from exc
     except jwt.InvalidTokenError:
@@ -150,6 +155,7 @@ def _verify_remote(token: str) -> AuthenticatedUser | None:
         user_id=str(user_id),
         email=payload.get("email"),
         role=str(payload.get("role") or "authenticated"),
+        token=token,
     )
     _user_cache[token] = (time.monotonic() + _USER_CACHE_TTL, user)
     return user
@@ -178,7 +184,7 @@ def verify_access_token(token: str | None) -> AuthenticatedUser:
         logger.warning("REQUIRE_AUTH is false: accepting an unverified token subject.")
         try:
             claims = jwt.decode(cleaned, options={"verify_signature": False})
-            return _user_from_claims(claims)
+            return _user_from_claims(claims, cleaned)
         except Exception as exc:
             raise AuthError("Token could not be read.") from exc
 

@@ -76,6 +76,9 @@ class Settings(BaseSettings):
     mongodb_db_name: str = "travel_discovery"
     mongodb_favorites_collection: str = "agent_favorites"
 
+    # ---- Favorites MCP server ---------------------------------------------
+    favorites_mcp_url: str = "http://localhost:8001/mcp"
+
     # ---- Tool RAG (Qdrant) -------------------------------------------------
     # Semantic tool retrieval: only tools relevant to the turn's request are
     # bound to the model, instead of always sending every tool schema.

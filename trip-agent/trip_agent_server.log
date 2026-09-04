@@ -1,0 +1,87 @@
+INFO:     Started server process [10100]
+INFO:     Waiting for application startup.
+INFO:src.memory.checkpointer:conversation checkpointer: in-memory
+INFO:httpx:HTTP Request: GET http://localhost:6333/collections/trip_agent_tools/exists "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: DELETE http://localhost:6333/collections/trip_agent_tools "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: PUT http://localhost:6333/collections/trip_agent_tools "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: PUT http://localhost:6333/collections/trip_agent_tools/points?wait=true "HTTP/1.1 200 OK"
+INFO:src.graph.tool_retrieval:tool RAG index seeded: 7 point(s) covering 11 tool(s)
+INFO:src.main:trip agent ready | supabase=True mongo=True tracing=True tool_rag=True
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:httpx:HTTP Request: GET http://localhost:6333/collections/trip_agent_tools/exists "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:50616 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61270 - "GET /favorites HTTP/1.1" 200 OK
+INFO:httpx:HTTP Request: GET https://tswxjqqvmnazihilbogc.supabase.co/rest/v1/agent_conversations?select=id&id=eq.06eb53f7-fd52-4249-bb8e-65e1079a9d20&user_id=eq.0b843fbb-940f-48ff-a967-392884c8041c&limit=1 "HTTP/2 200 OK"
+INFO:httpx:HTTP Request: POST https://tswxjqqvmnazihilbogc.supabase.co/rest/v1/agent_conversations "HTTP/2 201 Created"
+INFO:httpx:HTTP Request: POST https://tswxjqqvmnazihilbogc.supabase.co/rest/v1/agent_messages "HTTP/2 201 Created"
+INFO:     127.0.0.1:59358 - "POST /chat/send HTTP/1.1" 200 OK
+INFO:httpx:HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: GET https://tswxjqqvmnazihilbogc.supabase.co/rest/v1/agent_user_memory?select=key%2Cvalue&user_id=eq.0b843fbb-940f-48ff-a967-392884c8041c "HTTP/2 200 OK"
+INFO:httpx:HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: POST http://localhost:6333/collections/trip_agent_tools/points/query "HTTP/1.1 200 OK"
+INFO:src.graph.tool_retrieval:tool retrieval for "save a trip called 'ZZZ MCP E2E Test c22649' with the note 'temporary e2e test entry'." -> ['list_trip_favorites', 'save_trip_favorite', 'update_trip_favorite', 'remove_trip_favorite_section', 'delete_trip_favorite', 'get_accommodation_details', 'search_accommodations'] | scores: [('list_trip_favorites,save_trip_favorite,update_trip_favorite,remove_trip_favorite_section,delete_trip_favorite', 0.57754505), ('get_accommodation_details', 0.56225455), ('search_accommodations', 0.54908615)]
+INFO:httpx:HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: POST http://localhost:8001/mcp "HTTP/1.1 200 OK"
+INFO:mcp.client.streamable_http:Received session ID: 70c525b60c4740828e87da9d3ffe7be4
+INFO:mcp.client.streamable_http:Negotiated protocol version: 2025-11-25
+INFO:httpx:HTTP Request: GET http://localhost:8001/mcp "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: POST http://localhost:8001/mcp "HTTP/1.1 202 Accepted"
+INFO:httpx:HTTP Request: POST http://localhost:8001/mcp "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: POST http://localhost:8001/mcp "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: DELETE http://localhost:8001/mcp "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: POST https://tswxjqqvmnazihilbogc.supabase.co/rest/v1/agent_messages "HTTP/2 201 Created"
+INFO:httpx:HTTP Request: PATCH https://tswxjqqvmnazihilbogc.supabase.co/rest/v1/agent_conversations?id=eq.06eb53f7-fd52-4249-bb8e-65e1079a9d20&user_id=eq.0b843fbb-940f-48ff-a967-392884c8041c "HTTP/2 200 OK"
+INFO:httpx:HTTP Request: POST https://tswxjqqvmnazihilbogc.supabase.co/rest/v1/agent_message_usage "HTTP/2 201 Created"
+INFO:httpx:HTTP Request: GET https://tswxjqqvmnazihilbogc.supabase.co/rest/v1/agent_conversations?select=id&id=eq.06eb53f7-fd52-4249-bb8e-65e1079a9d20&user_id=eq.0b843fbb-940f-48ff-a967-392884c8041c&limit=1 "HTTP/2 200 OK"
+INFO:httpx:HTTP Request: POST https://tswxjqqvmnazihilbogc.supabase.co/rest/v1/agent_messages "HTTP/2 201 Created"
+INFO:     127.0.0.1:55389 - "POST /chat/send HTTP/1.1" 200 OK
+INFO:httpx:HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: GET https://tswxjqqvmnazihilbogc.supabase.co/rest/v1/agent_user_memory?select=key%2Cvalue&user_id=eq.0b843fbb-940f-48ff-a967-392884c8041c "HTTP/2 200 OK"
+INFO:httpx:HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: POST http://localhost:6333/collections/trip_agent_tools/points/query "HTTP/1.1 200 OK"
+INFO:src.graph.tool_retrieval:tool retrieval for "delete the saved trip called 'ZZZ MCP E2E Test c22649'" -> ['list_trip_favorites', 'save_trip_favorite', 'update_trip_favorite', 'remove_trip_favorite_section', 'delete_trip_favorite', 'get_accommodation_details', 'web_search'] | scores: [('list_trip_favorites,save_trip_favorite,update_trip_favorite,remove_trip_favorite_section,delete_trip_favorite', 0.60810995), ('get_accommodation_details', 0.49049407), ('web_search', 0.4895979)]
+INFO:httpx:HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: POST http://localhost:8001/mcp "HTTP/1.1 200 OK"
+INFO:mcp.client.streamable_http:Received session ID: e5aa0d1700eb4d8f8dfa605ee3d5d101
+INFO:mcp.client.streamable_http:Negotiated protocol version: 2025-11-25
+INFO:httpx:HTTP Request: GET http://localhost:8001/mcp "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: POST http://localhost:8001/mcp "HTTP/1.1 202 Accepted"
+INFO:httpx:HTTP Request: POST http://localhost:8001/mcp "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: POST http://localhost:8001/mcp "HTTP/1.1 202 Accepted"
+INFO:httpx:HTTP Request: POST http://localhost:8001/mcp "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: DELETE http://localhost:8001/mcp "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: POST https://tswxjqqvmnazihilbogc.supabase.co/rest/v1/agent_selection_log?on_conflict=conversation_id%2Cselection_id "HTTP/2 201 Created"
+INFO:httpx:HTTP Request: POST https://tswxjqqvmnazihilbogc.supabase.co/rest/v1/agent_messages "HTTP/2 201 Created"
+INFO:httpx:HTTP Request: PATCH https://tswxjqqvmnazihilbogc.supabase.co/rest/v1/agent_conversations?id=eq.06eb53f7-fd52-4249-bb8e-65e1079a9d20&user_id=eq.0b843fbb-940f-48ff-a967-392884c8041c "HTTP/2 200 OK"
+INFO:httpx:HTTP Request: POST https://tswxjqqvmnazihilbogc.supabase.co/rest/v1/agent_message_usage "HTTP/2 201 Created"
+INFO:httpx:HTTP Request: POST https://tswxjqqvmnazihilbogc.supabase.co/rest/v1/agent_selection_log?on_conflict=conversation_id%2Cselection_id "HTTP/2 200 OK"
+INFO:     127.0.0.1:54854 - "POST /chat/resume HTTP/1.1" 200 OK
+INFO:httpx:HTTP Request: POST http://localhost:8001/mcp "HTTP/1.1 200 OK"
+INFO:mcp.client.streamable_http:Received session ID: 15e9a7689eb045c889cf42a2ae087e32
+INFO:mcp.client.streamable_http:Negotiated protocol version: 2025-11-25
+INFO:httpx:HTTP Request: GET http://localhost:8001/mcp "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: POST http://localhost:8001/mcp "HTTP/1.1 202 Accepted"
+INFO:httpx:HTTP Request: POST http://localhost:8001/mcp "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: POST http://localhost:8001/mcp "HTTP/1.1 202 Accepted"
+INFO:httpx:HTTP Request: POST http://localhost:8001/mcp "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: DELETE http://localhost:8001/mcp "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: POST http://localhost:8001/mcp "HTTP/1.1 200 OK"
+INFO:mcp.client.streamable_http:Received session ID: 4e44704cb4e64d8c92ca7ec3b20c1b47
+INFO:mcp.client.streamable_http:Negotiated protocol version: 2025-11-25
+INFO:httpx:HTTP Request: GET http://localhost:8001/mcp "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: POST http://localhost:8001/mcp "HTTP/1.1 202 Accepted"
+INFO:httpx:HTTP Request: POST http://localhost:8001/mcp "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: POST http://localhost:8001/mcp "HTTP/1.1 202 Accepted"
+INFO:httpx:HTTP Request: POST http://localhost:8001/mcp "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: DELETE http://localhost:8001/mcp "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: POST https://tswxjqqvmnazihilbogc.supabase.co/rest/v1/agent_messages "HTTP/2 201 Created"
+INFO:httpx:HTTP Request: PATCH https://tswxjqqvmnazihilbogc.supabase.co/rest/v1/agent_conversations?id=eq.06eb53f7-fd52-4249-bb8e-65e1079a9d20&user_id=eq.0b843fbb-940f-48ff-a967-392884c8041c "HTTP/2 200 OK"
+INFO:httpx:HTTP Request: POST https://tswxjqqvmnazihilbogc.supabase.co/rest/v1/agent_message_usage "HTTP/2 201 Created"
+INFO:     127.0.0.1:54890 - "GET /favorites HTTP/1.1" 200 OK

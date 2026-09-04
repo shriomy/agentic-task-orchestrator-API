@@ -328,6 +328,30 @@ def test_hil_pauses_then_continues_with_only_the_picked_destination(harness):
     assert [option.label for option in selection.picked] == ["Bergen"]
 
 
+def test_exhausted_nudges_fall_back_to_real_results_not_vague_filler(harness):
+    """If the model never complies with either nudge, the final answer must
+    still surface the actual places it found — not the model's vague closing
+    text, which the user has no way to act on."""
+    graph, model, _ = harness(
+        [
+            AIMessage(content="", tool_calls=[tool_call("search_places", {"city": "Sydney"}, "c1")]),
+            AIMessage(content="Here are some great spots in Sydney!"),  # skips the pause -> nudge 1
+            AIMessage(content="Let me know if you want more details!"),  # skips again -> nudge 2
+            AIMessage(content="Feel free to ask if you need anything else!"),  # nudges exhausted
+        ]
+    )
+    _patch_agent(graph, model)
+
+    result = graph.invoke(
+        {"thread_id": "t29", "user_id": USER, "message": "top spots in Sydney, let me pick some"},
+        config={"configurable": {"thread_id": "t29", **CONFIG_BASE}},
+    )
+
+    assert result["selection_nudges"] == 2
+    assert "A place" in result["bot_response"]
+    assert result["bot_response"] != "Feel free to ask if you need anything else!"
+
+
 def test_two_pauses_in_a_single_turn(harness):
     """Pick places, then pick which of those to price hotels for."""
     graph, model, calls = harness(

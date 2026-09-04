@@ -2,29 +2,30 @@
 
 Three things to note about identity, pausing, and confirmation:
 
-* The favorites tools take NO user_id argument. The acting user is read from the
-  runtime config, which the API layer fills in from the verified Supabase JWT.
-  A model that hallucinates or is talked into naming another user's id has no
-  parameter to put it in.
+* The favorites tools take NO user_id argument. They call out to
+  favorites-mcp-server (see ../mcp_clients/favorites_client.py), forwarding the
+  caller's verified Supabase token from `config.configurable.auth_token` — that
+  server independently re-verifies the token and derives the acting user from
+  it. A model that hallucinates or is talked into naming another user's id has
+  no parameter to put it in, same guarantee as before, now enforced across a
+  network boundary instead of in-process.
 
 * `request_user_selection` calls `interrupt()`. It also returns a ToolMessage
   alongside the state update: a tool_call with no matching ToolMessage makes the
   next model request invalid, which is why the earlier version broke on resume.
 
 * Destructive favorites actions (delete, section removal) confirm with the user
-  BEFORE acting, and that confirmation is enforced inside the tool itself rather
-  than left to the system prompt. The same reliability gap that made HIL pausing
-  need code-level enforcement (see require_selection in nodes.py) applies here:
-  a model instructed to "confirm before deleting" will not always do it. Calling
-  `interrupt()` is not limited to a dedicated tool — any tool function can pause
-  mid-execution, so these tools raise their own yes/no confirmation and only
-  proceed once it comes back affirmative.
+  BEFORE acting. That confirmation is now driven by favorites-mcp-server's own
+  MCP elicitation (it calls `ctx.elicit()` before touching Mongo) — the client
+  side in favorites_client.py bridges that into this same graph's `interrupt()`,
+  so the pause still shows up as the identical yes/no picker the UI already
+  renders for `request_user_selection`. Only `request_user_selection` itself
+  calls `interrupt()` directly in this file now.
 """
 
 from __future__ import annotations
 
 import logging
-import uuid
 from typing import Annotated, Any, Literal
 
 from langchain_core.messages import ToolMessage
@@ -33,17 +34,9 @@ from langchain_core.tools import InjectedToolCallId, tool
 from langgraph.prebuilt import InjectedState
 from langgraph.types import Command, interrupt
 
-from ..db.mongo import resolve_section
-from ..guardrails.authorization import AuthorizationError, require_user_id
+from ..mcp_clients import favorites_client
 from ..tools.activities import search_events
 from ..tools.destinations import search_destinations
-from ..tools.favorites import (
-    delete_favorite,
-    get_favorites,
-    remove_favorite_section,
-    save_favorite,
-    update_favorite,
-)
 from ..tools.hotels import get_accommodation_details, search_accommodations
 from ..tools.poi import get_place_details, search_places
 from .state import Selection, SelectionOption
@@ -53,16 +46,6 @@ logger = logging.getLogger(__name__)
 # The tool name the router watches for, so the pause is handled by the node that
 # knows how to interrupt rather than by the generic tool executor.
 SELECTION_TOOL = "request_user_selection"
-
-
-def acting_user_id(config: RunnableConfig | None, *, operation: str) -> str:
-    """Read the verified user id out of the runtime config.
-
-    This is the single source of identity for every database operation. It is
-    set once per request by the API layer from the decoded access token.
-    """
-    configurable = (config or {}).get("configurable") or {}
-    return require_user_id(configurable.get("auth_user_id"), operation=operation)
 
 
 # --------------------------------------------------------------------------- #
@@ -211,8 +194,7 @@ def list_trip_favorites_tool(
         destination: Optional — limit to one destination, e.g. "Kyoto".
         section: Optional — return only "places", "events" or "accommodations".
     """
-    user_id = acting_user_id(config, operation="get_favorites")
-    return get_favorites(user_id, destination=destination, section=section)
+    return favorites_client.list_trip_favorites(config, destination=destination, section=section)
 
 
 @tool("save_trip_favorite")
@@ -239,8 +221,6 @@ def save_trip_favorite_tool(
         accommodations: Accommodation objects from search_accommodations chosen.
         notes: Any free-text note the user wants kept with the trip.
     """
-    user_id = acting_user_id(config, operation="save_favorite")
-
     # Backfill from the thread's answered selections so "save these details
     # regarding Kyoto" captures what was actually picked, turns ago, verbatim.
     from .context import saved_picks_payloads
@@ -263,8 +243,8 @@ def save_trip_favorite_tool(
     accommodations = accommodations if accommodations else relevant(picked.get("accommodations", []))
 
     thread_id = getattr(state, "thread_id", None) if state is not None else None
-    return save_favorite(
-        user_id,
+    return favorites_client.save_trip_favorite(
+        config,
         destination,
         places=places,
         events=events,
@@ -301,40 +281,14 @@ def update_trip_favorite_tool(
         accommodations: Accommodation objects to add.
         notes: Replacement note text.
     """
-    user_id = acting_user_id(config, operation="update_favorite")
-    return update_favorite(
-        user_id,
+    return favorites_client.update_trip_favorite(
+        config,
         destination,
         places=places,
         events=events,
         accommodations=accommodations,
         notes=notes,
-        replace_sections=False,
     )
-
-
-def _confirm(reason: str, *, kind: str, destination: str | None) -> bool:
-    """Pause for a yes/no and return whether the user confirmed.
-
-    Called from inside a destructive tool, before it touches the database.
-    `interrupt()` works from any tool function, not only a dedicated one — it
-    just pauses this call until the graph is resumed.
-    """
-    reply = interrupt(
-        {
-            "type": "selection",
-            "selection_id": f"confirm_{uuid.uuid4().hex[:10]}",
-            "kind": "confirmation",
-            "destination": destination,
-            "reason": reason,
-            "options": [
-                {"id": "yes", "label": f"Yes, {kind}"},
-                {"id": "no", "label": "No, keep it"},
-            ],
-        }
-    )
-    picked = {str(item).strip().lower() for item in _picked_ids_from(reply, [])}
-    return "yes" in picked
 
 
 @tool("remove_trip_favorite_section")
@@ -357,26 +311,9 @@ def remove_trip_favorite_section_tool(
         item_ids: Optional — remove only these specific items instead of the
             whole section.
     """
-    user_id = acting_user_id(config, operation="remove_favorite_section")
-    resolved = resolve_section(section) or section
-    what = f"{len(item_ids)} item(s) from" if item_ids else "all of"
-    confirmed = _confirm(
-        f"Remove {what} the {resolved} in your {destination} trip? "
-        "The rest of that trip stays as it is.",
-        kind=f"remove the {resolved}",
-        destination=destination,
+    return favorites_client.remove_trip_favorite_section(
+        config, destination, section, item_ids=item_ids
     )
-    if not confirmed:
-        return {
-            "action": "cancelled",
-            "destination": destination,
-            "section": resolved,
-            # Blunt on purpose: models have reported a cancelled action as a
-            # success when the field alone was "cancelled" — this line must be
-            # impossible to misread as "it happened".
-            "outcome_for_user": f"NOT removed. The user said no, so the {resolved} in {destination} is unchanged.",
-        }
-    return remove_favorite_section(user_id, destination, section, item_ids=item_ids)
 
 
 @tool("delete_trip_favorite")
@@ -391,20 +328,7 @@ def delete_trip_favorite_tool(destination: str, config: RunnableConfig = None) -
     Args:
         destination: Which saved trip to delete, e.g. "Paris".
     """
-    user_id = acting_user_id(config, operation="delete_favorite")
-    confirmed = _confirm(
-        f"Delete your entire {destination} trip — all its places, events and stays? "
-        "This can't be undone.",
-        kind="delete it",
-        destination=destination,
-    )
-    if not confirmed:
-        return {
-            "action": "cancelled",
-            "destination": destination,
-            "outcome_for_user": f"NOT deleted. The user said no, so the {destination} trip is still saved exactly as it was.",
-        }
-    return delete_favorite(user_id, destination)
+    return favorites_client.delete_trip_favorite(config, destination)
 
 
 # --------------------------------------------------------------------------- #

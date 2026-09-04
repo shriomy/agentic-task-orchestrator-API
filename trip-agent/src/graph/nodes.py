@@ -680,6 +680,41 @@ class RequireSelectionNode:
         }
 
 
+def _selection_fallback_text(state: GraphState) -> str | None:
+    """Real results to show when RequireSelectionNode's nudges ran out and the
+    model still never called request_user_selection.
+
+    The model's own final text in that case is typically vague filler ("feel
+    free to ask!") because it drafted an answer instead of pausing — showing
+    that is worse than showing the actual list the user asked to choose from.
+    Scans this turn's ToolMessages (back to the last HumanMessage) for the
+    first result list shaped like the discovery tools' output
+    (`{"places" | "events" | "accommodations": [{"name": ..., ...}, ...]}`)
+    and lists their names. Returns None if nothing usable is found, so the
+    caller can fall back to the model's own text instead.
+    """
+    for message in reversed(state.messages or []):
+        if isinstance(message, HumanMessage):
+            break
+        if not isinstance(message, ToolMessage):
+            continue
+        try:
+            payload = json.loads(message.content) if isinstance(message.content, str) else message.content
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        for value in payload.values():
+            if isinstance(value, list) and value and all(isinstance(item, dict) and item.get("name") for item in value):
+                names = [str(item["name"]) for item in value[:10]]
+                listed = "\n".join(f"{i}. {name}" for i, name in enumerate(names, start=1))
+                return (
+                    "Here's what I found — I wasn't able to bring up the picker, so just "
+                    f"tell me which ones you'd like:\n\n{listed}"
+                )
+    return None
+
+
 class FinalizeNode:
     """Guardrail 2, output half: redact internals and disclose what was withheld."""
 
@@ -695,6 +730,13 @@ class FinalizeNode:
             updates["messages"] = closing
 
         draft = state.last_agent_output or ""
+        if (
+            state.wants_selection
+            and not state.has_selection_this_turn()
+            and int(state.selection_nudges or 0) >= RequireSelectionNode.MAX_NUDGES
+        ):
+            draft = _selection_fallback_text(state) or draft
+
         if not draft.strip():
             draft = (
                 "I ran out of steps before I could pull that together into an answer. "
